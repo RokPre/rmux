@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() { printf 'rmux: %s\n' "$*" >&2; exit 1; }
+usage() { fail 'usage: rmux {new|up} NAME [--cwd DIRECTORY] [-- COMMAND [ARG...]] | rmux attach NAME | rmux ls'; }
+
+command -v dtach >/dev/null || fail 'dtach is required'
+command -v flock >/dev/null || fail 'flock is required'
+
+mode=${1-}
+[[ -n $mode ]] || usage
+shift
+case $mode in
+  new|up|attach)
+    name=${1-}
+    [[ -n $name && $name != . && $name != .. && $name != */* && $name != *$'\n'* ]] || fail 'invalid session name'
+    shift
+    ;;
+  ls) name= ;;
+  *) usage ;;
+esac
+
+cwd_set=0
+cwd=
+cmd=()
+if [[ $mode == new || $mode == up ]]; then
+  if [[ ${1-} == --cwd ]]; then
+    (($# >= 2)) || usage
+    cwd_set=1
+    cwd=$2
+    shift 2
+  fi
+  if (($#)); then
+    [[ $1 == -- && $# -ge 2 ]] || usage
+    shift
+    cmd=("$@")
+  fi
+else
+  (($# == 0)) || usage
+fi
+
+runtime=${XDG_RUNTIME_DIR:-/run/user/$UID}
+[[ -d $runtime && -O $runtime ]] || fail "runtime directory unavailable or not owned by current user: $runtime"
+umask 077
+dir=$runtime/rmux
+mkdir -p -- "$dir" "$runtime/rmux-locks"
+[[ -d $dir && -O $dir && ! -L $dir && -d $runtime/rmux-locks && -O $runtime/rmux-locks && ! -L $runtime/rmux-locks ]] || fail 'unsafe runtime directory'
+# Return 0 for live, 1 for absent or refused, and 2 for other errors.
+probe() {
+  local result
+  [[ -e $1 || -L $1 || -S $1 ]] || return 1
+  [[ -S $1 && ! -L $1 ]] || return 2
+  if result=$(LC_ALL=C dtach -p "$1" </dev/null 2>&1); then
+    return 0
+  fi
+  [[ $result == *': Connection refused' ]] && return 1
+  return 2
+}
+
+if [[ $mode == ls ]]; then
+  shopt -s dotglob nullglob
+  for socket in "$dir"/*; do
+    [[ -S $socket && ! -L $socket ]] || continue
+    if probe "$socket"; then printf '%s\n' "${socket##*/}"; fi
+  done
+  exit 0
+fi
+
+socket=$dir/$name
+exec 9>"$runtime/rmux-locks/$name"
+flock -x 9
+state=0
+probe "$socket" || state=$?
+case $state in
+  0)
+    [[ $mode != new ]] || fail "session already exists: $name"
+    ;;
+  1)
+    [[ $mode != attach ]] || fail "session does not exist: $name"
+    if [[ -S $socket && ! -L $socket ]]; then rm -- "$socket"; fi
+    ((${#cmd[@]})) || cmd=("${SHELL:-/bin/sh}" -i)
+    (
+      if ((cwd_set)); then cd -- "$cwd" || exit 1; fi
+      dtach -n "$socket" -r winch "${cmd[@]}" 9>&-
+    ) || fail "could not create session: $name"
+    ;;
+  *) fail "session cannot be reached: $name" ;;
+esac
+flock -u 9
+exec 9>&-
+exec dtach -a "$socket" -r winch
