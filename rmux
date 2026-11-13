@@ -2,7 +2,10 @@
 set -euo pipefail
 
 fail() { printf 'rmux: %s\n' "$*" >&2; exit 1; }
-usage() { fail 'usage: rmux {new|up} NAME [--cwd DIRECTORY] [-- COMMAND [ARG...]] | rmux attach NAME | rmux ls'; }
+help() { printf '%s\n' 'usage: rmux {new|up} NAME [--cwd DIRECTORY] [-- COMMAND [ARG...]] | rmux {attach|kill} NAME | rmux ls'; }
+usage() { help >&2; exit 1; }
+
+if [[ ${1-} == --help && $# == 1 ]]; then help; exit 0; fi
 
 command -v dtach >/dev/null || fail 'dtach is required'
 command -v flock >/dev/null || fail 'flock is required'
@@ -11,7 +14,7 @@ mode=${1-}
 [[ -n $mode ]] || usage
 shift
 case $mode in
-  new|up|attach)
+  new|up|attach|kill)
     name=${1-}
     [[ -n $name && $name != . && $name != .. && $name != */* && $name != *$'\n'* ]] || fail 'invalid session name'
     shift
@@ -43,8 +46,8 @@ runtime=${XDG_RUNTIME_DIR:-/run/user/$UID}
 [[ -d $runtime && -O $runtime ]] || fail "runtime directory unavailable or not owned by current user: $runtime"
 umask 077
 dir=$runtime/rmux
-mkdir -p -- "$dir" "$runtime/rmux-locks"
-[[ -d $dir && -O $dir && ! -L $dir && -d $runtime/rmux-locks && -O $runtime/rmux-locks && ! -L $runtime/rmux-locks ]] || fail 'unsafe runtime directory'
+mkdir -p -- "$dir" "$runtime/rmux-locks" "$runtime/rmux-pids"
+[[ -d $dir && -O $dir && ! -L $dir && -d $runtime/rmux-locks && -O $runtime/rmux-locks && ! -L $runtime/rmux-locks && -d $runtime/rmux-pids && -O $runtime/rmux-pids && ! -L $runtime/rmux-pids ]] || fail 'unsafe runtime directory'
 # Return 0 for live, 1 for absent or refused, and 2 for other errors.
 probe() {
   local result
@@ -55,6 +58,45 @@ probe() {
   fi
   [[ $result == *': Connection refused' ]] && return 1
   return 2
+}
+
+# Linux process start time distinguishes a recorded process from a reused PID.
+start_time() {
+  local stat
+  [[ -r /proc/$1/stat ]] || return 1
+  stat=$(<"/proc/$1/stat") || return 1
+  stat=${stat##*) }
+  local -a fields
+  read -r -a fields <<< "$stat"
+  printf '%s\n' "${fields[19]}"
+}
+
+# Match the filesystem socket to a socket descriptor held by the master.
+owns_socket() {
+  local pid=$1 line prefix inode fd target
+  while IFS= read -r line; do
+    [[ $line == *" $socket" ]] || continue
+    prefix=${line%" $socket"}
+    inode=${prefix##* }
+    [[ $inode =~ ^[0-9]+$ ]] || continue
+    for fd in /proc/"$pid"/fd/*; do
+      target=$(readlink -- "$fd" 2>/dev/null) || continue
+      [[ $target == "socket:[$inode]" ]] && return 0
+    done
+  done < /proc/net/unix
+  return 1
+}
+
+kill_tree() {
+  local pid=$1 expected=$2 children child child_start
+  [[ $(start_time "$pid") == "$expected" ]] || return 0
+  children=$(<"/proc/$pid/task/$pid/children") || return 1
+  for child in $children; do
+    child_start=$(start_time "$child") || continue
+    kill_tree "$child" "$child_start" || return 1
+  done
+  [[ $(start_time "$pid") == "$expected" ]] || return 0
+  kill -KILL "$pid" 2>/dev/null || [[ ! -e /proc/$pid ]]
 }
 
 if [[ $mode == ls ]]; then
@@ -71,6 +113,25 @@ exec 9>"$runtime/rmux-locks/$name"
 flock -x 9
 state=0
 probe "$socket" || state=$?
+if [[ $mode == kill ]]; then
+  [[ $state == 0 ]] || fail "session does not exist or cannot be reached: $name"
+  pidfile=$runtime/rmux-pids/$name
+  [[ -f $pidfile && ! -L $pidfile ]] || fail "session is not tracked; exit it manually: $name"
+  read -r pid recorded_start < "$pidfile" || fail "invalid session identity: $name"
+  [[ $pid =~ ^[0-9]+$ && $recorded_start =~ ^[0-9]+$ ]] || fail "invalid session identity: $name"
+  [[ $(start_time "$pid") == "$recorded_start" && $(<"/proc/$pid/comm") == dtach ]] || fail "session identity no longer matches: $name"
+  owns_socket "$pid" || fail "session identity does not own socket: $name"
+  kill_tree "$pid" "$recorded_start" || fail "could not stop session: $name"
+  for ((attempt=0; attempt<500; attempt++)); do
+    state=0
+    probe "$socket" || state=$?
+    [[ $state != 0 ]] && break
+    sleep 0.01
+  done
+  [[ $state == 1 ]] || fail "session did not stop cleanly: $name"
+  rm -f -- "$pidfile"
+  exit 0
+fi
 case $state in
   0)
     [[ $mode != new ]] || fail "session already exists: $name"
@@ -79,10 +140,20 @@ case $state in
     [[ $mode != attach ]] || fail "session does not exist: $name"
     if [[ -S $socket && ! -L $socket ]]; then rm -- "$socket"; fi
     ((${#cmd[@]})) || cmd=("${SHELL:-/bin/sh}" -i)
+    if ((cwd_set)); then (cd -- "$cwd") || fail "could not create session: $name"; fi
     (
       if ((cwd_set)); then cd -- "$cwd" || exit 1; fi
-      dtach -n "$socket" -r winch "${cmd[@]}" 9>&-
-    ) || fail "could not create session: $name"
+      exec setsid dtach -N "$socket" -r winch "${cmd[@]}" 9>&- </dev/null >/dev/null 2>&1
+    ) &
+    pid=$!
+    recorded_start=$(start_time "$pid") || fail "could not track session: $name"
+    for ((attempt=0; attempt<500; attempt++)); do
+      if probe "$socket"; then break; fi
+      kill -0 "$pid" 2>/dev/null || fail "could not create session: $name"
+      sleep 0.01
+    done
+    probe "$socket" || fail "could not create session: $name"
+    printf '%s %s\n' "$pid" "$recorded_start" > "$runtime/rmux-pids/$name"
     ;;
   *) fail "session cannot be reached: $name" ;;
 esac

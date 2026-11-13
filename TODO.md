@@ -1,6 +1,5 @@
 # TODOs
 
-
 # DONEs
 
 - [x] DONE: Deliver persistent rmux sessions [rmux](#rmux)
@@ -21,6 +20,17 @@
       - [x] DONE: Switch the OMP launcher [omp](#omp)
       - [x] DONE: Test the real launcher paths [launcher_test](#launcher_test)
       - [x] DONE: Document rmux usage [docs](#docs)
+
+- [x] DONE: Deliver named session termination [kill_feature](#kill_feature)
+  - [x] DONE: Implement session termination [kill_change](#kill_change)
+    - [x] DONE: Build and verify the kill command [kill_session](#kill_session)
+      - [x] DONE: Determine safe termination mechanism [kill_method](#kill_method)
+      - [x] DONE: Implement the kill command [kill_command](#kill_command)
+      - [x] DONE: Update command usage [kill_usage](#kill_usage)
+      - [x] DONE: Test terminating a live session [kill_live_test](#kill_live_test)
+      - [x] DONE: Test attached clients and isolation [kill_clients_test](#kill_clients_test)
+      - [x] DONE: Test termination error cases [kill_errors_test](#kill_errors_test)
+      - [x] DONE: Test session lifecycle races [kill_race_test](#kill_race_test)
 
 ## rmux
 
@@ -143,3 +153,71 @@ Exercise the actual terminal and OMP entry points, including terminal close and 
 
 The CLI usage message is the intended user-facing documentation; no separate usage document is required.
 
+## kill_feature
+
+- Role: material
+- Scope: local
+- Difficulty: 4 kyu
+- Children: kill_change
+
+Provide and verify named session termination as one material. Identifying the correct dtach session without affecting others is the main difficulty; no prerequisite feature work.
+
+## kill_change
+
+- Role: composite
+- Scope: local
+- Difficulty: 4 kyu
+- Children: kill_session
+
+One coherent CLI change including process identification, termination, help, and focused tests. The safe termination mechanism must be established before implementation.
+
+## kill_session
+
+- Role: molecule
+- Scope: local
+- Difficulty: 4 kyu
+- Children: kill_method & kill_command & kill_usage & kill_live_test & kill_clients_test & kill_errors_test & kill_race_test
+
+Implement and test rmux kill NAME as a single reviewable outcome. Investigate dtach behavior first; session lifecycle races and isolation are the main risks.
+
+## kill_method
+
+- Role: atomic
+
+Track the dtach master identity when creating a session; pre-existing sessions without tracked identity must be ended manually. Investigate safe identity verification and application termination.
+
+## kill_command
+
+- Role: atomic
+
+Add rmux kill NAME for sessions created with tracked identity. Stop the running application and report missing, untracked or unreachable sessions without affecting other sessions.
+
+## kill_usage
+
+- Role: atomic
+
+Include kill NAME in the CLI usage message and help message.
+
+## kill_live_test
+
+- Role: atomic
+
+Verify a detached application stops, the session is no longer listed, and its name can be reused.
+
+## kill_clients_test
+
+- Role: atomic
+
+Verify attached clients disconnect and another live session remains unaffected.
+
+## kill_errors_test
+
+- Role: atomic
+
+Verify invalid names, missing sessions and stale or unreachable sockets cannot terminate unrelated processes.
+
+## kill_race_test
+
+- Role: atomic
+
+Exercise termination alongside session creation or attachment and verify it does not terminate a replacement or unrelated session.

@@ -1,3 +1,4 @@
+import fcntl
 import os
 import pty
 import select
@@ -111,6 +112,92 @@ class Sessions(unittest.TestCase):
         os.write(fd1, b'exit\n')
         self.wait_for(lambda: self.run_rmux('ls').stdout == '')
 
+
+    def test_kill_stops_process_tree_and_attached_clients(self):
+        marker = Path(self.tmp.name, 'pids')
+        script = ('import os,signal,subprocess,time; '
+                  'signal.signal(signal.SIGHUP, signal.SIG_IGN); '
+                  'child=subprocess.Popen(["sleep","60"]); '
+                  f'open({str(marker)!r},"w").write(str(os.getpid())+" "+str(child.pid)); '
+                  'time.sleep(60)')
+        first, fd1 = self.start('new', 'target', '--', 'python3', '-c', script)
+        other, fd2 = self.start('new', 'other', '--', 'sh', '-i')
+        self.wait_for(marker.exists)
+        self.wait_for(lambda: 'other' in self.run_rmux('ls').stdout.splitlines())
+        attached, fd3 = self.start('attach', 'target')
+        time.sleep(0.1)
+        self.assertIsNone(attached.poll())
+        pids = [int(pid) for pid in marker.read_text().split()]
+        self.assertEqual(self.run_rmux('kill', 'target').returncode, 0)
+        self.wait_for(lambda: first.poll() is not None and attached.poll() is not None)
+        def stopped(pid):
+            try:
+                return Path(f'/proc/{pid}/stat').read_text().split(') ')[1][0] == 'Z'
+            except FileNotFoundError:
+                return True
+        self.wait_for(lambda: all(stopped(pid) for pid in pids))
+        self.assertEqual(self.run_rmux('ls').stdout, 'other\n')
+        self.assertIsNone(other.poll())
+        replacement, fd4 = self.start('new', 'target', '--', 'sh', '-i')
+        self.wait_for(lambda: 'target' in self.run_rmux('ls').stdout.splitlines())
+        os.write(fd4, b'exit\n')
+
+    def test_kill_rejects_untracked_and_bad_identity(self):
+        self.run_rmux('ls')
+        socket_path = f'{self.tmp.name}/rmux/old'
+        subprocess.run(['dtach', '-n', socket_path, 'sh', '-i'], check=True)
+        try:
+            result = self.run_rmux('kill', 'old')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('not tracked', result.stderr)
+            self.assertIn('old', self.run_rmux('ls').stdout.splitlines())
+        finally:
+            subprocess.run(['dtach', '-p', socket_path], input=b'exit\n', check=True)
+        process, fd = self.start('new', 'tracked', '--', 'sh', '-i')
+        self.wait_for(lambda: 'tracked' in self.run_rmux('ls').stdout.splitlines())
+        pidfile = Path(self.tmp.name, 'rmux-pids', 'tracked')
+        pidfile.write_text(f'{os.getpid()} 0\n')
+        self.assertNotEqual(self.run_rmux('kill', 'tracked').returncode, 0)
+        self.assertIsNone(process.poll())
+        self.assertNotEqual(self.run_rmux('kill', 'missing').returncode, 0)
+        self.assertNotEqual(self.run_rmux('kill', '../bad').returncode, 0)
+        self.assertIn('kill', self.run_rmux('--help').stdout)
+        self.assertIn('kill', self.run_rmux().stderr)
+        os.write(fd, b'exit\n')
+
+    def test_kill_rejects_other_sessions_identity(self):
+        first, fd1 = self.start('new', 'first', '--', 'sh', '-i')
+        second, fd2 = self.start('new', 'second', '--', 'sh', '-i')
+        first_id = Path(self.tmp.name, 'rmux-pids', 'first')
+        second_id = Path(self.tmp.name, 'rmux-pids', 'second')
+        self.wait_for(lambda: first_id.exists() and second_id.exists())
+        first_id.write_text(second_id.read_text())
+        result = self.run_rmux('kill', 'first')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('does not own socket', result.stderr)
+        self.assertIsNone(first.poll())
+        self.assertIsNone(second.poll())
+        os.write(fd1, b'exit\n')
+        os.write(fd2, b'exit\n')
+
+    def test_kill_and_up_do_not_kill_replacement(self):
+        first, fd = self.start('new', 'race', '--', 'sh', '-i')
+        self.wait_for(lambda: 'race' in self.run_rmux('ls').stdout.splitlines())
+        lock_path = Path(self.tmp.name, 'rmux-locks', 'race')
+        with lock_path.open('r') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            killer = subprocess.Popen([str(RMUX), 'kill', 'race'], env=self.env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            time.sleep(0.1)
+            replacement, fd2 = self.start('up', 'race', '--', 'sh', '-i')
+            time.sleep(0.1)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        stdout, stderr = killer.communicate(timeout=5)
+        self.assertEqual(killer.returncode, 0, stderr.decode())
+        self.wait_for(lambda: first.poll() is not None)
+        self.wait_for(lambda: 'race' in self.run_rmux('ls').stdout.splitlines())
+        self.assertIsNone(replacement.poll())
+        os.write(fd2, b'exit\n')
 
 if __name__ == '__main__':
     unittest.main()
