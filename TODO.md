@@ -1,86 +1,7 @@
 # TODOs
 
-- [ ] TODO: Select or create sessions in both launchers [session_picker](#session_picker)
-  - [ ] TODO: Deliver session selection for both launchers [picker_delivery](#picker_delivery)
-    - [ ] TODO: Implement and verify session selection [picker_work](#picker_work)
-      - [ ] TODO: Identify current session naming and creation [picker_naming](#picker_naming)
-      - [ ] TODO: List existing rmux sessions [picker_list](#picker_list)
-      - [ ] TODO: Filter sessions for the selected checkout [picker_filter](#picker_filter)
-      - [ ] TODO: Create a clean session when none exists [picker_empty](#picker_empty)
-      - [ ] TODO: Offer existing sessions and new session [picker_choice](#picker_choice)
-      - [ ] TODO: Create an additional suffixed session [picker_new](#picker_new)
-      - [ ] TODO: Verify both launcher workflows [picker_verify](#picker_verify)
 
 
-
-## session_picker
-
-- Role: material
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: picker_delivery
-
-Allow independent persistent terminal and OMP sessions for the selected repository or worktree. Preserve existing clean session names, repository and worktree selection, and the OMP resume command.
-
-## picker_delivery
-
-- Role: composite
-- Scope: coordinated
-- Difficulty: 5 kyu
-- Children: picker_work
-
-One coherent change covering session selection in both dotfiles launchers and verification of both workflows. It depends on understanding the existing naming and creation behavior.
-
-## picker_work
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 5 kyu
-- Children: picker_naming & picker_list & picker_filter & picker_empty & picker_choice & picker_new & picker_verify
-
-Update both launchers to list and filter live rmux sessions, create the first session directly, and otherwise offer attachment or creation of an additional uniquely suffixed session. Take care not to match another checkout merely because its name shares a prefix.
-
-## picker_naming
-
-- Role: atomic
-
-Inspect how both launchers construct session names and create or attach to sessions.
-
-## picker_list
-
-- Role: atomic
-
-Use rmux ls to obtain live session names for the launchers.
-
-## picker_filter
-
-- Role: atomic
-
-Select the sessions belonging to the chosen repository or worktree and launcher type, including the existing clean name and additional suffixed names.
-
-## picker_empty
-
-- Role: atomic
-
-When no matching sessions exist, create the session using the existing clean name and selected directory.
-
-## picker_choice
-
-- Role: atomic
-
-When matching sessions exist, show them in a picker alongside a new-session option; attach to the chosen existing session and honor cancellation.
-
-## picker_new
-
-- Role: atomic
-
-When new session is selected, create an independent session with a unique hash suffix, preserving the selected directory and launcher command.
-
-## picker_verify
-
-- Role: atomic
-
-Exercise both launchers for clean creation, filtering, attachment, additional session creation, cancellation, and preserved worktree and OMP command behavior.
 
 # DONEs
 
@@ -114,6 +35,16 @@ Exercise both launchers for clean creation, filtering, attachment, additional se
       - [x] DONE: Test termination error cases [kill_errors_test](#kill_errors_test)
       - [x] DONE: Test session lifecycle races [kill_race_test](#kill_race_test)
 
+- [x] DONE: Select or create sessions in both launchers [session_picker](#session_picker)
+  - [x] DONE: Deliver session selection for both launchers [picker_delivery](#picker_delivery)
+    - [x] DONE: Implement and verify session selection [picker_work](#picker_work)
+      - [x] DONE: Identify current session naming and creation [picker_naming](#picker_naming)
+      - [x] DONE: List existing rmux sessions [picker_list](#picker_list)
+      - [x] DONE: Filter sessions for the selected checkout [picker_filter](#picker_filter)
+      - [x] DONE: Create a clean session when none exists [picker_empty](#picker_empty)
+      - [x] DONE: Offer existing sessions and new session [picker_choice](#picker_choice)
+      - [x] DONE: Create an additional suffixed session [picker_new](#picker_new)
+      - [x] DONE: Verify both launcher workflows [picker_verify](#picker_verify)
 ## rmux
 
 - Role: material
@@ -303,3 +234,73 @@ Verify invalid names, missing sessions and stale or unreachable sockets cannot t
 - Role: atomic
 
 Exercise termination alongside session creation or attachment and verify it does not terminate a replacement or unrelated session.
+
+## session_picker
+
+- Role: material
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: picker_delivery
+
+Allow independent persistent terminal and OMP sessions for the selected repository or worktree. Preserve existing clean session names, repository and worktree selection, and the OMP resume command.
+
+## picker_delivery
+
+- Role: composite
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Children: picker_work
+
+One coherent change covering session selection in both dotfiles launchers and verification of both workflows. It depends on understanding the existing naming and creation behavior.
+
+## picker_work
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Children: picker_naming & picker_list & picker_filter & picker_empty & picker_choice & picker_new & picker_verify
+
+Update both launchers to list and filter live rmux sessions, create the first session directly, and otherwise offer attachment or creation of an additional uniquely suffixed session. Take care not to match another checkout merely because its name shares a prefix.
+
+## picker_naming
+
+- Role: atomic
+
+Inspect how both launchers construct session names and create or attach to sessions.
+
+## picker_list
+
+- Role: atomic
+
+Use rmux ls to obtain live session names for the launchers.
+
+## picker_filter
+
+- Role: atomic
+
+Select the sessions belonging to the chosen repository or worktree and launcher type, including the existing clean name and additional suffixed names.
+
+## picker_empty
+
+- Role: atomic
+
+When no matching sessions exist, create the session using the existing clean name and selected directory.
+
+## picker_choice
+
+- Role: atomic
+
+When matching sessions exist, show them in a picker alongside a new-session option; attach to the chosen existing session and honor cancellation.
+
+## picker_new
+
+- Role: atomic
+
+When new session is selected, create an independent session with a unique hash suffix, preserving the selected directory and launcher command.
+
+## picker_verify
+
+- Role: atomic
+
+Exercise both launchers for clean creation, filtering, attachment, additional session creation, cancellation, and preserved worktree and OMP command behavior.
+
