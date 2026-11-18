@@ -1,13 +1,13 @@
 # TODOs
 
 - [ ] TODO: Deliver interactive rmux sessions [interactive_mux](#interactive_mux)
-  - [ ] TODO: Decide the interactive architecture [design_stage](#design_stage)
-    - [ ] TODO: Determine the implementation architecture [architecture](#architecture)
-      - [ ] TODO: Inspect the existing CLI and launcher contracts [inspect_contract](#inspect_contract)
-      - [ ] TODO: Assess terminal emulation and multiplexer implementation options [assess_engines](#assess_engines)
-      - [ ] TODO: Assess whether dtach can support the required session model [assess_dtach](#assess_dtach)
-      - [ ] TODO: Inspect st key mappings and window-manager interception [inspect_st_keys](#inspect_st_keys)
-      - [ ] TODO: Choose the session, client and terminal architecture [select_design](#select_design)
+  - [x] TODO: Decide the interactive architecture [design_stage](#design_stage)
+    - [x] TODO: Determine the implementation architecture [architecture](#architecture)
+      - [x] TODO: Inspect the existing CLI and launcher contracts [inspect_contract](#inspect_contract)
+      - [x] TODO: Assess terminal emulation and multiplexer implementation options [assess_engines](#assess_engines)
+      - [x] TODO: Assess whether dtach can support the required session model [assess_dtach](#assess_dtach)
+      - [x] TODO: Inspect st key mappings and window-manager interception [inspect_st_keys](#inspect_st_keys)
+      - [x] TODO: Choose the session, client and terminal architecture [select_design](#select_design)
   - [ ] TODO: Deliver persistent session and buffer runtime [runtime_stage](#runtime_stage)
     - [ ] TODO: Implement named session runtime [session_runtime](#session_runtime)
       - [ ] TODO: Implement existing new, up, attach, ls and kill commands [preserve_cli](#preserve_cli)
@@ -118,27 +118,35 @@ Investigate the current implementation, existing terminal technology and st inpu
 - Role: atomic
 
 
+The Bash CLI currently supports new, up, attach, ls and kill with --cwd and command forwarding. Tests cover session lifecycle, attach/detach, concurrent up and guarded process-tree kill. The i3 and OMP launchers rely on named sessions, checkout-specific cwd, four-hex additional-session suffixes, and the OMP custom-resume command; preserve these contracts during migration.
+
 ## assess_engines
 
 - Role: atomic
 
+
+Use a Rust session server/client with one PTY and vt100 terminal screen per buffer, a shared server-owned layout/focus model, and independently rendered attached clients. portable-pty provides PTYs and vt100 parses terminal streams into screen state; this directly models buffers referenced by multiple windows. tmux provides mature sessions and panes but its pane/window model does not directly allow one live buffer to appear in multiple layout cells, so using it unchanged would violate the contract.
 
 ## assess_dtach
 
 - Role: atomic
 
 
+dtach remains suitable only for the current one-command attach/detach session. Its one socket and one terminal stream do not provide independent PTYs/screens, shared split layout/focus, or the required minimum size across multiple views. Replace it as the interactive runtime rather than layering window behavior on the existing socket.
+
 ## inspect_st_keys
 
 - Role: atomic
 
+
+The checked-out and installed st binaries match. st maps Ctrl-Shift-H/L to CSI-u sequences; ordinary Ctrl letters are emitted as control bytes, so Ctrl-T/W/H/L need explicit distinct CSI-u mappings. Alt-letter combinations are emitted with an ESC prefix. The inspected i3 keybindings use Super-modified Alt or Ctrl combinations, not the proposed bare Alt controls. Verify end-to-end key delivery through live st/i3 during acceptance.
 
 ## select_design
 
 - Role: atomic
 - Dependency: inspect_contract & assess_engines & assess_dtach & inspect_st_keys
 
-Compare implementation options against shared layout, independent buffers, persistence and compatibility; retain shared views unless an independent design is substantially simpler and the user agrees.
+Decision: replace the dtach runtime with a Rust per-session server and attached terminal clients. The server owns session metadata, ordered buffer identities, shared window layout and focus, one PTY plus vt100 screen per buffer, and the attachment set. Each client renders the shared state into its local terminal; windows may reference the same buffer or none. Compute each buffer’s PTY dimensions as the minimum width and height among all windows showing it across all clients, then center that screen and fill unused window space with a patterned background. Use portable-pty for PTY management and vt100 for terminal parsing. Keep the public session CLI and launcher conventions; extend st key encoding for control chords that otherwise collapse to C0 bytes. This is chosen over unchanged tmux/dtach because neither existing process model directly supports a single live buffer referenced by multiple layout cells.
 
 ## runtime_stage
 
