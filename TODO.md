@@ -1,6 +1,631 @@
 # TODOs
 
+- [ ] TODO: Deliver interactive rmux sessions [interactive_mux](#interactive_mux)
+  - [ ] TODO: Decide the interactive architecture [design_stage](#design_stage)
+    - [ ] TODO: Determine the implementation architecture [architecture](#architecture)
+      - [ ] TODO: Inspect the existing CLI and launcher contracts [inspect_contract](#inspect_contract)
+      - [ ] TODO: Assess terminal emulation and multiplexer implementation options [assess_engines](#assess_engines)
+      - [ ] TODO: Assess whether dtach can support the required session model [assess_dtach](#assess_dtach)
+      - [ ] TODO: Inspect st key mappings and window-manager interception [inspect_st_keys](#inspect_st_keys)
+      - [ ] TODO: Choose the session, client and terminal architecture [select_design](#select_design)
+  - [ ] TODO: Deliver persistent session and buffer runtime [runtime_stage](#runtime_stage)
+    - [ ] TODO: Implement named session runtime [session_runtime](#session_runtime)
+      - [ ] TODO: Implement existing new, up, attach, ls and kill commands [preserve_cli](#preserve_cli)
+      - [ ] TODO: Create the persistent session process [session_server](#session_server)
+      - [ ] TODO: Connect an interactive client to a named session [client_attach](#client_attach)
+      - [ ] TODO: Keep the session running when a terminal disconnects [client_detach](#client_detach)
+      - [ ] TODO: Track simultaneous attached terminal clients [attachment_tracking](#attachment_tracking)
+      - [ ] TODO: Clean up session resources after session termination [session_cleanup](#session_cleanup)
+      - [ ] TODO: Adapt affected terminal and OMP launchers to the new runtime [launcher_migration](#launcher_migration)
+    - [ ] TODO: Implement terminal buffers [buffer_runtime](#buffer_runtime)
+      - [ ] TODO: Start a terminal program for a new buffer [buffer_process](#buffer_process)
+      - [ ] TODO: Maintain the terminal screen state for each buffer [terminal_state](#terminal_state)
+      - [ ] TODO: Keep an undisplayed buffer running [hidden_buffer](#hidden_buffer)
+      - [ ] TODO: Maintain the ordered buffer list [buffer_order](#buffer_order)
+      - [ ] TODO: Terminate the selected buffer and its program [buffer_close](#buffer_close)
+      - [ ] TODO: Remove a buffer when its program exits [buffer_exit](#buffer_exit)
+      - [ ] TODO: End the session when its last buffer closes [final_buffer](#final_buffer)
+  - [ ] TODO: Deliver shared interactive views [interface_stage](#interface_stage)
+    - [ ] TODO: Implement shared rmux windows [window_layout](#window_layout)
+      - [ ] TODO: Display the initial buffer in one rmux window [initial_window](#initial_window)
+      - [ ] TODO: Split a window vertically showing its existing buffer [vertical_split](#vertical_split)
+      - [ ] TODO: Split a window horizontally showing its existing buffer [horizontal_split](#horizontal_split)
+      - [ ] TODO: Close an rmux window without closing its buffer [close_window](#close_window)
+      - [ ] TODO: Ignore window-close requests for the final rmux window [last_window](#last_window)
+      - [ ] TODO: Move focus between adjacent windows by direction [focus_window](#focus_window)
+      - [ ] TODO: Move the focused window in the requested direction [move_window](#move_window)
+      - [ ] TODO: Resize the focused window in the requested direction [resize_window](#resize_window)
+      - [ ] TODO: Switch the focused window to the previous or next buffer [switch_buffer](#switch_buffer)
+      - [ ] TODO: Move the focused buffer left or right in the buffer list [reorder_buffer](#reorder_buffer)
+      - [ ] TODO: Show a newly created buffer in the focused window [new_buffer_view](#new_buffer_view)
+      - [ ] TODO: Replace a closed buffer in every window displaying it [closed_buffer_views](#closed_buffer_views)
+    - [ ] TODO: Render shared sessions across attached terminals [presentation](#presentation)
+      - [ ] TODO: Render the shared window layout for each attached terminal [render_layout](#render_layout)
+      - [ ] TODO: Render the ordered buffer line with the focused buffer identified [buffer_line](#buffer_line)
+      - [ ] TODO: Compute each displayed buffer size from the minimum view width and height across all clients [buffer_geometry](#buffer_geometry)
+      - [ ] TODO: Notify the buffer program when its terminal size changes [notify_resize](#notify_resize)
+      - [ ] TODO: Center each buffer screen within a larger rmux window [centered_view](#centered_view)
+      - [ ] TODO: Fill unused window space with a background pattern [background_pattern](#background_pattern)
+      - [ ] TODO: Recalculate buffer sizes when views, attachments or terminal sizes change [geometry_updates](#geometry_updates)
+      - [ ] TODO: Propagate shared layout, focus and buffer changes to all attached clients [shared_redraw](#shared_redraw)
+    - [ ] TODO: Implement interactive keyboard controls [input_controls](#input_controls)
+      - [ ] TODO: Choose a distinguishable input encoding and application key-passthrough policy [key_protocol](#key_protocol)
+      - [ ] TODO: Bind Ctrl-T and Ctrl-W to buffer creation and closure [buffer_keys](#buffer_keys)
+      - [ ] TODO: Bind Ctrl-H and Ctrl-L to buffer navigation [buffer_navigation_keys](#buffer_navigation_keys)
+      - [ ] TODO: Bind Ctrl-Shift-H and Ctrl-Shift-L to buffer reordering [buffer_move_keys](#buffer_move_keys)
+      - [ ] TODO: Bind Alt-V and Alt-B to vertical and horizontal splits [window_split_keys](#window_split_keys)
+      - [ ] TODO: Bind Alt-W to closing an rmux window [window_close_key](#window_close_key)
+      - [ ] TODO: Bind Alt-H, J, K and L to directional window focus [window_focus_keys](#window_focus_keys)
+      - [ ] TODO: Bind Alt-Shift directional keys to window movement [window_move_keys](#window_move_keys)
+      - [ ] TODO: Bind Alt-Ctrl directional keys to window resizing [window_size_keys](#window_size_keys)
+      - [ ] TODO: Update st key handling if the chosen bindings require it [st_integration](#st_integration)
+  - [ ] TODO: Verify and document the delivered interface [acceptance_stage](#acceptance_stage)
+    - [ ] TODO: Verify the complete interactive contract [verification](#verification)
+      - [ ] TODO: Verify the existing CLI creation, attachment, listing and kill behavior [verify_cli](#verify_cli)
+      - [ ] TODO: Verify the real terminal and OMP launcher paths [verify_launchers](#verify_launchers)
+      - [ ] TODO: Verify session and buffers survive terminal disconnect and reattach [verify_detach](#verify_detach)
+      - [ ] TODO: Verify a hidden buffer keeps running and can be displayed again [verify_hidden](#verify_hidden)
+      - [ ] TODO: Verify both split directions initially show the same live buffer [verify_splits](#verify_splits)
+      - [ ] TODO: Verify switching one rmux window leaves another window buffer unchanged [verify_independent_switch](#verify_independent_switch)
+      - [ ] TODO: Verify closing windows preserves buffers and the last window stays open [verify_window_close](#verify_window_close)
+      - [ ] TODO: Verify buffer closure updates all views and the last buffer ends the session [verify_buffer_close](#verify_buffer_close)
+      - [ ] TODO: Verify buffer line navigation and reordering [verify_buffer_line](#verify_buffer_line)
+      - [ ] TODO: Verify directional window focus, movement and resizing [verify_window_controls](#verify_window_controls)
+      - [ ] TODO: Verify two attachments share layout, focus and actions [verify_shared_clients](#verify_shared_clients)
+      - [ ] TODO: Verify minimum buffer dimensions across views and differently sized clients [verify_shared_size](#verify_shared_size)
+      - [ ] TODO: Verify centered screen placement and background in larger views [verify_centering](#verify_centering)
+      - [ ] TODO: Verify application dimensions update after resize, view changes and detach [verify_resize_events](#verify_resize_events)
+      - [ ] TODO: Verify the agreed key combinations through the actual st and i3 path [verify_keys](#verify_keys)
+      - [ ] TODO: Verify non-rmux input reaches interactive terminal applications [verify_application_input](#verify_application_input)
+    - [ ] TODO: Update user-facing usage [usage_docs](#usage_docs)
+      - [ ] TODO: Document session, buffer and rmux window terminology [document_terms](#document_terms)
+      - [ ] TODO: Document the supported keyboard controls and conflicts [document_controls](#document_controls)
+      - [ ] TODO: Document session, buffer and window lifetime behavior [document_lifecycle](#document_lifecycle)
+      - [ ] TODO: Document shared attachments and buffer sizing [document_views](#document_views)
 
+
+## interactive_mux
+
+- Role: material
+- Scope: coordinated
+- Difficulty: 1 kyu
+- Uncertainty: high
+- Children: design_stage & runtime_stage & interface_stage & acceptance_stage
+
+Deliver shared, persistent named sessions containing independent terminal buffers and a shared split-window view. Scope spans architecture, terminal rendering, input, lifecycle, existing CLI and launcher integration, and real interactive verification. Difficulty is high because terminal emulation, process lifetime, simultaneous attachments, and resize behavior interact. Architecture research precedes implementation; all child goals are required.
+
+## design_stage
+
+- Role: composite
+- Scope: coordinated
+- Difficulty: 2 kyu
+- Children: architecture
+
+Group the research into one coherent design decision and reviewable commit. Scope covers existing contracts, terminal technology and input; difficulty is high because the choice governs persistence and shared rendering. No prerequisites.
+
+## architecture
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 2 kyu
+- Uncertainty: high
+- Children: inspect_contract & assess_engines & assess_dtach & inspect_st_keys & select_design
+
+Investigate the current implementation, existing terminal technology and st input before choosing a design. This cross-cutting decision is difficult because buffers need terminal state, multiple views and persistent processes. It precedes implementation and must preserve existing interfaces unless a deliberate migration is needed.
+
+## inspect_contract
+
+- Role: atomic
+
+
+## assess_engines
+
+- Role: atomic
+
+
+## assess_dtach
+
+- Role: atomic
+
+
+## inspect_st_keys
+
+- Role: atomic
+
+
+## select_design
+
+- Role: atomic
+- Dependency: inspect_contract & assess_engines & assess_dtach & inspect_st_keys
+
+Compare implementation options against shared layout, independent buffers, persistence and compatibility; retain shared views unless an independent design is substantially simpler and the user agrees.
+
+## runtime_stage
+
+- Role: composite
+- Scope: coordinated
+- Difficulty: 2 kyu
+- Children: session_runtime & buffer_runtime
+- Dependency: design_stage
+
+Group session lifecycle and terminal buffer work into one coherent runtime commit. Scope covers processes, clients, terminal state and compatibility; difficulty is high because lifecycle and terminal state interact. Depends on the architecture decision.
+
+## session_runtime
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 2 kyu
+- Children: preserve_cli & session_server & client_attach & client_detach & attachment_tracking & session_cleanup & launcher_migration
+- Dependency: architecture
+
+Provide the persistent session and attachment lifecycle using the chosen architecture while preserving the existing CLI and launcher behavior. This spans process management and clients; difficulty lies in safe lifetime and concurrent attachments. Depends on the architecture decision.
+
+## preserve_cli
+
+- Role: atomic
+- Dependency: architecture
+
+Preserve name handling, creation command and working directory semantics, and safe session termination.
+
+## session_server
+
+- Role: atomic
+- Dependency: architecture
+
+
+## client_attach
+
+- Role: atomic
+- Dependency: architecture
+
+
+## client_detach
+
+- Role: atomic
+- Dependency: architecture
+
+
+## attachment_tracking
+
+- Role: atomic
+- Dependency: architecture
+
+
+## session_cleanup
+
+- Role: atomic
+- Dependency: architecture
+
+
+## launcher_migration
+
+- Role: atomic
+- Dependency: architecture
+
+Preserve project and worktree selection, multiple named sessions and the OMP resume command.
+
+## buffer_runtime
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 2 kyu
+- Children: buffer_process & terminal_state & hidden_buffer & buffer_order & buffer_close & buffer_exit & final_buffer
+- Dependency: architecture & session_runtime
+
+Manage running terminal programs independently of their display windows. Scope includes terminal state and process lifecycle; difficulty is preserving interactive application behavior while buffers are hidden or multiply displayed. Depends on the architecture decision and persistent session runtime.
+
+## buffer_process
+
+- Role: atomic
+- Dependency: architecture & session_runtime
+
+
+## terminal_state
+
+- Role: atomic
+- Dependency: architecture & session_runtime
+
+
+## hidden_buffer
+
+- Role: atomic
+- Dependency: architecture & session_runtime
+
+
+## buffer_order
+
+- Role: atomic
+- Dependency: architecture & session_runtime
+
+
+## buffer_close
+
+- Role: atomic
+- Dependency: architecture & session_runtime
+
+
+## buffer_exit
+
+- Role: atomic
+- Dependency: architecture & session_runtime
+
+
+## final_buffer
+
+- Role: atomic
+- Dependency: architecture & session_runtime
+
+
+## interface_stage
+
+- Role: composite
+- Scope: coordinated
+- Difficulty: 2 kyu
+- Children: window_layout & presentation & input_controls
+- Dependency: runtime_stage
+
+Group window layout, rendering and keyboard controls into one coherent interactive interface commit. Scope crosses layout, client rendering and input; difficulty is high because shared focus and terminal sizing interact. Depends on the runtime.
+
+## window_layout
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 2 kyu
+- Children: initial_window & vertical_split & horizontal_split & close_window & last_window & focus_window & move_window & resize_window & switch_buffer & reorder_buffer & new_buffer_view & closed_buffer_views
+- Dependency: buffer_runtime
+
+Represent the split layout and focused rmux window once per session. A window displays one buffer, while a buffer may appear in multiple windows or none. Scope covers layout and navigation; difficulty is preserving shared state and handling window and buffer lifecycle transitions. Depends on terminal buffers.
+
+## initial_window
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+
+## vertical_split
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+
+## horizontal_split
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+
+## close_window
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+
+## last_window
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+
+## focus_window
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+
+## move_window
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+
+## resize_window
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+
+## switch_buffer
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+
+## reorder_buffer
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+
+## new_buffer_view
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+
+## closed_buffer_views
+
+- Role: atomic
+- Dependency: buffer_runtime
+
+Select a remaining buffer when available; closing the final buffer ends the session.
+
+## presentation
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 2 kyu
+- Children: render_layout & buffer_line & buffer_geometry & notify_resize & centered_view & background_pattern & geometry_updates & shared_redraw
+- Dependency: buffer_runtime & window_layout & session_runtime
+
+Draw the shared layout, buffer line and terminal states in each attached terminal, including different sizes. This is difficult because a buffer has one application size despite multiple views and clients. Depends on buffers, shared windows and attachment tracking.
+
+## render_layout
+
+- Role: atomic
+- Dependency: buffer_runtime & window_layout & session_runtime
+
+
+## buffer_line
+
+- Role: atomic
+- Dependency: buffer_runtime & window_layout & session_runtime
+
+
+## buffer_geometry
+
+- Role: atomic
+- Dependency: buffer_runtime & window_layout & session_runtime
+
+
+## notify_resize
+
+- Role: atomic
+- Dependency: buffer_runtime & window_layout & session_runtime
+
+
+## centered_view
+
+- Role: atomic
+- Dependency: buffer_runtime & window_layout & session_runtime
+
+
+## background_pattern
+
+- Role: atomic
+- Dependency: buffer_runtime & window_layout & session_runtime
+
+
+## geometry_updates
+
+- Role: atomic
+- Dependency: buffer_runtime & window_layout & session_runtime
+
+
+## shared_redraw
+
+- Role: atomic
+- Dependency: buffer_runtime & window_layout & session_runtime
+
+
+## input_controls
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 3 kyu
+- Children: key_protocol & buffer_keys & buffer_navigation_keys & buffer_move_keys & window_split_keys & window_close_key & window_focus_keys & window_move_keys & window_size_keys & st_integration
+- Dependency: architecture & buffer_runtime & window_layout
+
+Translate the agreed shortcuts into shared session actions while allowing terminal applications to receive other input. Difficulty lies in terminal encoding, existing application bindings and st or i3 interception. Depends on architecture, buffers and windows; exact encoding and conflict policy require investigation.
+
+## key_protocol
+
+- Role: atomic
+- Dependency: architecture & buffer_runtime & window_layout
+
+
+## buffer_keys
+
+- Role: atomic
+- Dependency: architecture & buffer_runtime & window_layout
+
+
+## buffer_navigation_keys
+
+- Role: atomic
+- Dependency: architecture & buffer_runtime & window_layout
+
+
+## buffer_move_keys
+
+- Role: atomic
+- Dependency: architecture & buffer_runtime & window_layout
+
+
+## window_split_keys
+
+- Role: atomic
+- Dependency: architecture & buffer_runtime & window_layout
+
+
+## window_close_key
+
+- Role: atomic
+- Dependency: architecture & buffer_runtime & window_layout
+
+
+## window_focus_keys
+
+- Role: atomic
+- Dependency: architecture & buffer_runtime & window_layout
+
+
+## window_move_keys
+
+- Role: atomic
+- Dependency: architecture & buffer_runtime & window_layout
+
+
+## window_size_keys
+
+- Role: atomic
+- Dependency: architecture & buffer_runtime & window_layout
+
+
+## st_integration
+
+- Role: atomic
+- Dependency: architecture & buffer_runtime & window_layout
+
+Preserve existing st functionality and use the synced configuration if a change is needed.
+
+## acceptance_stage
+
+- Role: composite
+- Scope: coordinated
+- Difficulty: 2 kyu
+- Children: verification & usage_docs
+- Dependency: interface_stage
+
+Group end-to-end acceptance and usage documentation into one coherent delivery commit. Scope includes real clients, launchers and user-facing documentation; difficulty is high because interactive behavior needs verification across terminals. Depends on the interactive interface.
+
+## verification
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 2 kyu
+- Children: verify_cli & verify_launchers & verify_detach & verify_hidden & verify_splits & verify_independent_switch & verify_window_close & verify_buffer_close & verify_buffer_line & verify_window_controls & verify_shared_clients & verify_shared_size & verify_centering & verify_resize_events & verify_keys & verify_application_input
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+Exercise real terminal clients, running programs and launcher entry points, including edge cases and multiple attachments. Scope crosses runtime, rendering and integration; difficulty is reliably observing interactive terminal state and lifecycle. Depends on the implementation goals.
+
+## verify_cli
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_launchers
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_detach
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_hidden
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_splits
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_independent_switch
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_window_close
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_buffer_close
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_buffer_line
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_window_controls
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_shared_clients
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_shared_size
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_centering
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_resize_events
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_keys
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## verify_application_input
+
+- Role: atomic
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+
+
+## usage_docs
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Children: document_terms & document_controls & document_lifecycle & document_views
+- Dependency: verification
+
+Document the delivered session, buffer and rmux window model, controls, lifetime and attachment behavior. Scope is user-facing guidance; difficulty depends on the final implementation and verified shortcuts. Depends on complete interactive verification.
+
+## document_terms
+
+- Role: atomic
+- Dependency: verification
+
+
+## document_controls
+
+- Role: atomic
+- Dependency: verification
+
+
+## document_lifecycle
+
+- Role: atomic
+- Dependency: verification
+
+
+## document_views
+
+- Role: atomic
+- Dependency: verification
 
 
 # DONEs
@@ -45,6 +670,7 @@
       - [x] DONE: Offer existing sessions and new session [picker_choice](#picker_choice)
       - [x] DONE: Create an additional suffixed session [picker_new](#picker_new)
       - [x] DONE: Verify both launcher workflows [picker_verify](#picker_verify)
+
 ## rmux
 
 - Role: material
@@ -303,4 +929,3 @@ When new session is selected, create an independent session with a unique hash s
 - Role: atomic
 
 Exercise both launchers for clean creation, filtering, attachment, additional session creation, cancellation, and preserved worktree and OMP command behavior.
-
