@@ -11,6 +11,20 @@ import unittest
 from pathlib import Path
 
 RMUX = Path(__file__).with_name('rmux')
+INPUT = 1
+WINDOW_STATE = 3
+NEW_BUFFER = 4
+CLOSE_BUFFER = 5
+PREVIOUS_BUFFER = 6
+NEXT_BUFFER = 7
+SPLIT_VERTICAL = 8
+SPLIT_HORIZONTAL = 9
+CLOSE_WINDOW = 10
+FOCUS_WINDOW = 11
+MOVE_WINDOW = 12
+RESIZE_WINDOW = 13
+REORDER_BUFFER_LEFT = 14
+REORDER_BUFFER_RIGHT = 15
 
 
 class Sessions(unittest.TestCase):
@@ -80,11 +94,27 @@ class Sessions(unittest.TestCase):
         size = int.from_bytes(header[1:], 'big')
         payload = self.read_exact(sock, size)
         return header[0], payload
+    def read_layout(self, sock):
+        while True:
+            kind, payload = self.read_frame(sock)
+            if kind == WINDOW_STATE:
+                return json.loads(payload)
+            if kind == 2:
+                self.fail('session closed while waiting for layout state')
+            self.assertEqual(kind, 1)
+
+    def window_leaves(self, node):
+        if node['kind'] == 'window':
+            return [node]
+        return (self.window_leaves(node['first']) +
+                self.window_leaves(node['second']))
 
     def receive_until(self, sock, text):
         output = bytearray()
         while text not in output:
             kind, payload = self.read_frame(sock)
+            if kind == 3:
+                continue
             if kind == 2:
                 self.fail('session closed while waiting for buffer output')
             self.assertEqual(kind, 1)
@@ -144,7 +174,8 @@ class Sessions(unittest.TestCase):
             self.assertIn(b'SECOND_BUFFER_VISIBLE', second_visible)
             self.send_frame(control, 6)
             first_screen = self.receive_until(control, b'FIRST_BUFFER_MARKER')
-            self.assertNotIn(b'SECOND_BUFFER_VISIBLE', first_screen)
+            current_screen = first_screen.rsplit(b'\x1b[H\x1b[J', 1)[-1]
+            self.assertNotIn(b'SECOND_BUFFER_VISIBLE', current_screen)
             time.sleep(2.2)
             self.send_frame(control, 7)
             second_screen = self.receive_until(control, b'SECOND_BUFFER_HIDDEN')
@@ -174,6 +205,206 @@ class Sessions(unittest.TestCase):
             self.send_frame(control, 5)
             self.wait_for(lambda: self.run_rmux('ls').stdout == '')
             self.wait_for(lambda: process.poll() is not None)
+        finally:
+            control.close()
+
+    def test_shared_window_tree_actions(self):
+        self.start('new', 'windows', '--', 'sh', '-i')
+        self.wait_for(lambda: self.run_rmux('ls').stdout == 'windows\n')
+        first = self.attach_control('windows')
+        second = self.attach_control('windows')
+        last = None
+        try:
+            initial = self.read_layout(first)
+            self.assertEqual(initial, self.read_layout(second))
+            self.assertEqual(initial['focused_window'], 1)
+            self.assertEqual(initial['active_buffer'], 1)
+
+            self.send_frame(first, SPLIT_VERTICAL)
+            vertical = self.read_layout(first)
+            self.assertEqual(vertical, self.read_layout(second))
+            self.assertEqual(vertical['tree']['axis'], 'vertical')
+            self.assertEqual(
+                [(window['id'], window['buffer'])
+                 for window in self.window_leaves(vertical['tree'])],
+                [(1, 1), (2, 1)],
+            )
+            self.assertEqual(vertical['focused_window'], 2)
+
+            self.send_frame(second, SPLIT_HORIZONTAL)
+            split = self.read_layout(first)
+            self.assertEqual(split, self.read_layout(second))
+            self.assertEqual(split['tree']['second']['axis'], 'horizontal')
+            self.assertEqual(
+                [window['id'] for window in self.window_leaves(split['tree'])],
+                [1, 2, 3],
+            )
+            self.assertEqual(split['focused_window'], 3)
+
+            self.send_frame(first, FOCUS_WINDOW, b'h')
+            left = self.read_layout(first)
+            self.assertEqual(left, self.read_layout(second))
+            self.assertEqual(left['focused_window'], 1)
+
+            self.send_frame(first, FOCUS_WINDOW, b'l')
+            right = self.read_layout(first)
+            self.assertEqual(right, self.read_layout(second))
+            self.assertIn(right['focused_window'], [2, 3])
+            if right['focused_window'] == 3:
+                self.send_frame(first, FOCUS_WINDOW, b'k')
+                self.assertEqual(
+                    self.read_layout(first),
+                    self.read_layout(second),
+                )
+
+            self.send_frame(first, FOCUS_WINDOW, b'j')
+            down = self.read_layout(first)
+            self.assertEqual(down, self.read_layout(second))
+            self.assertEqual(down['focused_window'], 3)
+            self.send_frame(first, FOCUS_WINDOW, b'k')
+            focused = self.read_layout(first)
+            self.assertEqual(focused, self.read_layout(second))
+            self.assertEqual(focused['focused_window'], 2)
+
+            self.send_frame(first, MOVE_WINDOW, b'h')
+            moved_first = self.read_layout(first)
+            moved = self.read_layout(second)
+            self.assertEqual(moved_first, moved)
+            self.assertEqual(moved['focused_window'], 2)
+            self.assertEqual(
+                [window['id'] for window in self.window_leaves(moved['tree'])],
+                [2, 1, 3],
+            )
+
+            self.send_frame(second, RESIZE_WINDOW, b'l')
+            resized = self.read_layout(first)
+            self.assertEqual(resized, self.read_layout(second))
+            self.assertEqual(resized['tree']['ratio'], 55)
+
+            self.send_frame(first, CLOSE_WINDOW)
+            closed = self.read_layout(first)
+            self.assertEqual(closed, self.read_layout(second))
+            self.assertEqual(
+                [window['id'] for window in self.window_leaves(closed['tree'])],
+                [1, 3],
+            )
+            self.assertEqual(closed['focused_window'], 1)
+
+            self.send_frame(first, CLOSE_WINDOW)
+            one_window = self.read_layout(first)
+            self.assertEqual(one_window, self.read_layout(second))
+            self.assertEqual(
+                [window['id'] for window in self.window_leaves(one_window['tree'])],
+                [3],
+            )
+            self.send_frame(first, CLOSE_WINDOW)
+            last = self.attach_control('windows')
+            remaining = self.read_layout(last)
+            self.assertEqual(
+                [window['id'] for window in self.window_leaves(remaining['tree'])],
+                [3],
+            )
+            self.assertEqual(self.run_rmux('ls').stdout, 'windows\n')
+        finally:
+            first.close()
+            second.close()
+            if last is not None:
+                last.close()
+
+    def test_buffer_views_switch_close_and_exit_independently(self):
+        self.env['SHELL'] = '/bin/sh'
+        self.start('new', 'window-buffers', '--', 'sh', '-i')
+        self.wait_for(lambda: self.run_rmux('ls').stdout == 'window-buffers\n')
+        control = self.attach_control('window-buffers')
+        try:
+            self.read_layout(control)
+            self.send_frame(control, NEW_BUFFER)
+            created = self.read_layout(control)
+            self.assertEqual(created['buffers'], [1, 2])
+            self.assertEqual(created['active_buffer'], 2)
+            self.send_frame(
+                control,
+                INPUT,
+                b'echo HIDDEN_WINDOW_BUFFER_MARKER\n',
+            )
+            self.assertIn(
+                b'HIDDEN_WINDOW_BUFFER_MARKER',
+                self.receive_until(control, b'HIDDEN_WINDOW_BUFFER_MARKER'),
+            )
+
+            self.send_frame(control, SPLIT_VERTICAL)
+            split = self.read_layout(control)
+            self.assertEqual(
+                [window['buffer'] for window in self.window_leaves(split['tree'])],
+                [2, 2],
+            )
+
+            self.send_frame(control, FOCUS_WINDOW, b'h')
+            self.assertEqual(self.read_layout(control)['focused_window'], 1)
+            self.send_frame(control, PREVIOUS_BUFFER)
+            switched = self.read_layout(control)
+            self.assertEqual(
+                [window['buffer'] for window in self.window_leaves(switched['tree'])],
+                [1, 2],
+            )
+
+            self.send_frame(control, FOCUS_WINDOW, b'l')
+            self.assertEqual(self.read_layout(control)['focused_window'], 2)
+            self.send_frame(control, CLOSE_WINDOW)
+            closed_window = self.read_layout(control)
+            self.assertEqual(closed_window['buffers'], [1, 2])
+            self.assertEqual(
+                [window['buffer'] for window in self.window_leaves(closed_window['tree'])],
+                [1],
+            )
+            self.send_frame(control, NEXT_BUFFER)
+            restored = self.read_layout(control)
+            self.assertEqual(restored['active_buffer'], 2)
+            self.assertEqual(
+                [window['buffer'] for window in self.window_leaves(restored['tree'])],
+                [2],
+            )
+            self.assertIn(
+                b'HIDDEN_WINDOW_BUFFER_MARKER',
+                self.receive_until(control, b'HIDDEN_WINDOW_BUFFER_MARKER'),
+            )
+
+            self.send_frame(control, SPLIT_VERTICAL)
+            split = self.read_layout(control)
+            self.assertEqual(
+                [window['buffer'] for window in self.window_leaves(split['tree'])],
+                [2, 2],
+            )
+            self.send_frame(control, PREVIOUS_BUFFER)
+            switched = self.read_layout(control)
+            self.assertEqual(
+                [window['buffer'] for window in self.window_leaves(switched['tree'])],
+                [2, 1],
+            )
+            self.send_frame(control, REORDER_BUFFER_RIGHT)
+            reordered = self.read_layout(control)
+            self.assertEqual(reordered['buffers'], [2, 1])
+
+            self.send_frame(control, NEXT_BUFFER)
+            self.assertEqual(self.read_layout(control)['active_buffer'], 2)
+            self.send_frame(control, CLOSE_BUFFER)
+            closed = self.read_layout(control)
+            self.assertEqual(closed['buffers'], [1])
+            self.assertEqual(
+                [window['buffer'] for window in self.window_leaves(closed['tree'])],
+                [1, 1],
+            )
+
+            self.send_frame(control, NEW_BUFFER)
+            self.assertEqual(self.read_layout(control)['active_buffer'], 3)
+            self.send_frame(control, INPUT, b'exit\n')
+            exited = self.read_layout(control)
+            self.assertEqual(exited['buffers'], [1])
+            self.assertEqual(
+                [window['buffer'] for window in self.window_leaves(exited['tree'])],
+                [1, 1],
+            )
+            self.assertEqual(self.run_rmux('ls').stdout, 'window-buffers\n')
         finally:
             control.close()
 

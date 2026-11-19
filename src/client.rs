@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::Request;
 use crate::runtime::{SessionPaths, read_response, write_request};
-use crate::server::{CLOSE, INPUT, OUTPUT, RESIZE, read_frame, write_frame};
+use crate::server::{CLOSE, INPUT, OUTPUT, RESIZE, WINDOW_STATE, read_frame, write_frame};
 
 struct RawMode;
 
@@ -109,6 +109,7 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
                     output.write_all(&bytes)?;
                     output.flush()?;
                 }
+                Some((WINDOW_STATE, _)) => {}
                 Some((CLOSE, _)) | None => break,
                 Some(_) => {
                     return Err(io::Error::new(

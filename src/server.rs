@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::layout::{Axis, Direction, WindowLayout};
+
 use crate::runtime::{SessionPaths, process_start_time};
 use crate::{Request, Response};
 
@@ -24,12 +26,22 @@ pub(crate) const NEW_BUFFER: u8 = 4;
 pub(crate) const CLOSE_BUFFER: u8 = 5;
 pub(crate) const PREVIOUS_BUFFER: u8 = 6;
 pub(crate) const NEXT_BUFFER: u8 = 7;
+const SPLIT_VERTICAL: u8 = 8;
+const SPLIT_HORIZONTAL: u8 = 9;
+const CLOSE_WINDOW: u8 = 10;
+const FOCUS_WINDOW: u8 = 11;
+const MOVE_WINDOW: u8 = 12;
+const RESIZE_WINDOW: u8 = 13;
+const REORDER_BUFFER_LEFT: u8 = 14;
+const REORDER_BUFFER_RIGHT: u8 = 15;
 pub(crate) const OUTPUT: u8 = 1;
 pub(crate) const CLOSE: u8 = 2;
+pub(crate) const WINDOW_STATE: u8 = 3;
 const MAX_FRAME: usize = 1024 * 1024;
 
 pub(crate) enum Outgoing {
     Bytes(Vec<u8>),
+    Layout(Vec<u8>),
     Close,
 }
 
@@ -52,7 +64,7 @@ struct SessionState {
     clients: HashMap<u64, Client>,
     buffers: HashMap<u64, Buffer>,
     order: Vec<u64>,
-    active: u64,
+    layout: WindowLayout,
     next_buffer: u64,
 }
 
@@ -101,7 +113,7 @@ pub(crate) fn run_server(args: &[std::ffi::OsString]) -> io::Result<()> {
             clients: HashMap::new(),
             buffers: HashMap::from([(1, initial_buffer)]),
             order: vec![1],
-            active: 1,
+            layout: WindowLayout::new(1),
             next_buffer: 2,
         }),
         next_client: AtomicU64::new(1),
@@ -239,7 +251,7 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session: Arc<Session>, 
                     let mut state = lock_state(&session);
                     if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
                         buffer.parser.process(&output[..length]);
-                        if state.active == buffer_id {
+                        if active_buffer(&state) == Some(buffer_id) {
                             broadcast(&mut state, Outgoing::Bytes(output[..length].to_vec()));
                         }
                     } else {
@@ -259,12 +271,16 @@ fn lock_state(session: &Session) -> std::sync::MutexGuard<'_, SessionState> {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
 }
+fn active_buffer(state: &SessionState) -> Option<u64> {
+    state.layout.focused_buffer()
+}
 
 fn broadcast(state: &mut SessionState, message: Outgoing) {
     let mut disconnected = Vec::new();
     for (&id, client) in &state.clients {
         let result = match &message {
             Outgoing::Bytes(bytes) => client.sender.try_send(Outgoing::Bytes(bytes.clone())),
+            Outgoing::Layout(bytes) => client.sender.try_send(Outgoing::Layout(bytes.clone())),
             Outgoing::Close => client.sender.try_send(Outgoing::Close),
         };
         match result {
@@ -338,6 +354,7 @@ fn attach_client(
             },
         );
         resize_active(&mut state);
+        send_layout_to_client(&state, id);
         send_snapshot(&mut state);
     }
     thread::spawn(move || output_loop(output_stream, receiver));
@@ -349,12 +366,13 @@ fn attach_client(
         match kind {
             INPUT => {
                 let mut state = lock_state(&session);
-                let active = state.active;
-                if let Some(buffer) = state.buffers.get_mut(&active) {
-                    if buffer.writer.write_all(&payload).is_err() {
-                        break;
+                if let Some(active) = active_buffer(&state) {
+                    if let Some(buffer) = state.buffers.get_mut(&active) {
+                        if buffer.writer.write_all(&payload).is_err() {
+                            break;
+                        }
+                        let _ = buffer.writer.flush();
                     }
-                    let _ = buffer.writer.flush();
                 }
             }
             RESIZE if payload.len() == 4 => {
@@ -369,6 +387,14 @@ fn attach_client(
             CLOSE_BUFFER if payload.is_empty() => close_active_buffer(&session),
             PREVIOUS_BUFFER if payload.is_empty() => switch_buffer(&session, false),
             NEXT_BUFFER if payload.is_empty() => switch_buffer(&session, true),
+            SPLIT_VERTICAL if payload.is_empty() => split_focused(&session, Axis::Vertical),
+            SPLIT_HORIZONTAL if payload.is_empty() => split_focused(&session, Axis::Horizontal),
+            CLOSE_WINDOW if payload.is_empty() => close_focused_window(&session),
+            FOCUS_WINDOW if payload.len() == 1 => focus_window(&session, payload[0]),
+            MOVE_WINDOW if payload.len() == 1 => move_focused_window(&session, payload[0]),
+            RESIZE_WINDOW if payload.len() == 1 => resize_focused_window(&session, payload[0]),
+            REORDER_BUFFER_LEFT if payload.is_empty() => reorder_buffer(&session, false),
+            REORDER_BUFFER_RIGHT if payload.is_empty() => reorder_buffer(&session, true),
             DETACH => break,
             _ => break,
         }
@@ -389,32 +415,37 @@ fn create_buffer(session: &Arc<Session>) {
         let mut state = lock_state(session);
         let id = state.next_buffer;
         state.next_buffer = id.wrapping_add(1).max(1);
-        let size = current_size(&state).unwrap_or_else(|| {
-            state
-                .buffers
-                .get(&state.active)
-                .and_then(|buffer| buffer.master.get_size().ok())
-                .unwrap_or(PtySize {
-                    rows: 24,
-                    cols: 80,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-        });
+        let size = current_size(&state)
+            .or_else(|| {
+                active_buffer(&state)
+                    .and_then(|active| state.buffers.get(&active))
+                    .and_then(|buffer| buffer.master.get_size().ok())
+            })
+            .unwrap_or(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
         (id, size)
     };
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
-    let (buffer, reader) = match spawn_buffer(vec![shell, OsString::from("-i")], &session.cwd, size)
-    {
-        Ok(buffer) => buffer,
-        Err(_) => return,
-    };
+    let (mut buffer, reader) =
+        match spawn_buffer(vec![shell, OsString::from("-i")], &session.cwd, size) {
+            Ok(buffer) => buffer,
+            Err(_) => return,
+        };
     {
         let mut state = lock_state(session);
+        if session.shutdown.load(Ordering::Acquire) {
+            terminate_child(buffer.child.as_mut(), buffer.session_id);
+            return;
+        }
         state.order.push(id);
         state.buffers.insert(id, buffer);
-        state.active = id;
+        state.layout.set_focused_buffer(id);
         resize_active(&mut state);
+        send_layout(&mut state);
         send_snapshot(&mut state);
     }
     spawn_output_reader(reader, Arc::clone(session), id);
@@ -422,9 +453,14 @@ fn create_buffer(session: &Arc<Session>) {
 
 fn close_active_buffer(session: &Session) {
     let mut state = lock_state(session);
+    let Some(closing) = state.layout.focused_buffer() else {
+        return;
+    };
+    let Some(index) = state.order.iter().position(|id| *id == closing) else {
+        return;
+    };
     if state.order.len() == 1 {
-        let active = state.active;
-        if let Some(mut buffer) = state.buffers.remove(&active) {
+        if let Some(mut buffer) = state.buffers.remove(&closing) {
             terminate_child(buffer.child.as_mut(), buffer.session_id);
         }
         state.order.clear();
@@ -432,18 +468,14 @@ fn close_active_buffer(session: &Session) {
         session.shutdown.store(true, Ordering::Release);
         return;
     }
-    let old_active = state.active;
-    let index = state
-        .order
-        .iter()
-        .position(|id| *id == old_active)
-        .unwrap_or(0);
+    let replacement = state.order[(index + 1) % state.order.len()];
     state.order.remove(index);
-    if let Some(mut buffer) = state.buffers.remove(&old_active) {
+    state.layout.replace_buffer(closing, replacement);
+    if let Some(mut buffer) = state.buffers.remove(&closing) {
         terminate_child(buffer.child.as_mut(), buffer.session_id);
     }
-    state.active = state.order[index.min(state.order.len() - 1)];
     resize_active(&mut state);
+    send_layout(&mut state);
     send_snapshot(&mut state);
 }
 
@@ -452,25 +484,107 @@ fn switch_buffer(session: &Session, next: bool) {
     if state.order.len() < 2 {
         return;
     }
-    let index = state
-        .order
-        .iter()
-        .position(|id| *id == state.active)
-        .unwrap_or(0);
+    let Some(active) = state.layout.focused_buffer() else {
+        return;
+    };
+    let index = state.order.iter().position(|id| *id == active).unwrap_or(0);
     let new_index = if next {
         (index + 1) % state.order.len()
     } else {
         (index + state.order.len() - 1) % state.order.len()
     };
-    state.active = state.order[new_index];
+    let buffer = state.order[new_index];
+    state.layout.set_focused_buffer(buffer);
     resize_active(&mut state);
+    send_layout(&mut state);
     send_snapshot(&mut state);
 }
 
+fn reorder_buffer(session: &Session, right: bool) {
+    let mut state = lock_state(session);
+    let Some(active) = state.layout.focused_buffer() else {
+        return;
+    };
+    let Some(index) = state.order.iter().position(|id| *id == active) else {
+        return;
+    };
+    let destination = if right {
+        index + 1
+    } else {
+        index.saturating_sub(1)
+    };
+    if destination >= state.order.len() || destination == index {
+        return;
+    }
+    state.order.swap(index, destination);
+    send_layout(&mut state);
+}
+
+fn split_focused(session: &Session, axis: Axis) {
+    let mut state = lock_state(session);
+    if state.layout.split_focused(axis) {
+        resize_active(&mut state);
+        send_layout(&mut state);
+        send_snapshot(&mut state);
+    }
+}
+
+fn close_focused_window(session: &Session) {
+    let mut state = lock_state(session);
+    if state.layout.close_focused_window() {
+        resize_active(&mut state);
+        send_layout(&mut state);
+        send_snapshot(&mut state);
+    }
+}
+
+fn focus_window(session: &Session, encoded_direction: u8) {
+    let Some(direction) = Direction::from_byte(encoded_direction) else {
+        return;
+    };
+    let mut state = lock_state(session);
+    if state.layout.focus_direction(direction) {
+        resize_active(&mut state);
+        send_layout(&mut state);
+        send_snapshot(&mut state);
+    }
+}
+
+fn move_focused_window(session: &Session, encoded_direction: u8) {
+    let Some(direction) = Direction::from_byte(encoded_direction) else {
+        return;
+    };
+    let mut state = lock_state(session);
+    if state.layout.move_focused_window(direction) {
+        send_layout(&mut state);
+        send_snapshot(&mut state);
+    }
+}
+
+fn resize_focused_window(session: &Session, encoded_direction: u8) {
+    let Some(direction) = Direction::from_byte(encoded_direction) else {
+        return;
+    };
+    let mut state = lock_state(session);
+    if state.layout.resize_focused_window(direction) {
+        send_layout(&mut state);
+    }
+}
+
+fn send_layout(state: &mut SessionState) {
+    let snapshot = state.layout.snapshot(&state.order);
+    broadcast(state, Outgoing::Layout(snapshot));
+}
+fn send_layout_to_client(state: &SessionState, client_id: u64) {
+    let snapshot = state.layout.snapshot(&state.order);
+    if let Some(client) = state.clients.get(&client_id) {
+        let _ = client.sender.try_send(Outgoing::Layout(snapshot));
+    }
+}
+
 fn send_snapshot(state: &mut SessionState) {
-    let snapshot = state
-        .buffers
-        .get(&state.active)
+    let snapshot = active_buffer(state)
+        .and_then(|active| state.buffers.get(&active))
         .map(|buffer| buffer.parser.screen().contents_formatted().into_bytes());
     if let Some(snapshot) = snapshot {
         for chunk in snapshot.chunks(MAX_FRAME) {
@@ -501,7 +615,9 @@ fn resize_active(state: &mut SessionState) {
     let Some(size) = current_size(state) else {
         return;
     };
-    let active = state.active;
+    let Some(active) = state.layout.focused_buffer() else {
+        return;
+    };
     if let Some(buffer) = state.buffers.get_mut(&active) {
         let current = buffer.master.get_size().ok();
         if !current.is_some_and(|current| current.rows == size.rows && current.cols == size.cols) {
@@ -525,28 +641,35 @@ fn reap_exited_buffers(session: &Session) -> io::Result<bool> {
     if exited.is_empty() {
         return Ok(false);
     }
-    let active_index = state
-        .order
-        .iter()
-        .position(|id| *id == state.active)
-        .unwrap_or(0);
-    let active_exited = exited.contains(&state.active);
-    for id in exited {
-        if let Some(mut buffer) = state.buffers.remove(&id) {
+
+    let old_order = state.order.clone();
+    let exited_set: HashSet<_> = exited.iter().copied().collect();
+    for id in &exited {
+        if let Some(mut buffer) = state.buffers.remove(id) {
             terminate_child(buffer.child.as_mut(), buffer.session_id);
         }
-        state.order.retain(|ordered_id| *ordered_id != id);
     }
+    state.order.retain(|id| !exited_set.contains(id));
     if state.order.is_empty() {
         close_clients(&mut state);
         session.shutdown.store(true, Ordering::Release);
         return Ok(true);
     }
-    if active_exited {
-        state.active = state.order[active_index.min(state.order.len() - 1)];
-        resize_active(&mut state);
-        send_snapshot(&mut state);
+
+    for id in exited {
+        let Some(index) = old_order.iter().position(|old_id| *old_id == id) else {
+            continue;
+        };
+        let replacement = (1..old_order.len())
+            .map(|offset| old_order[(index + offset) % old_order.len()])
+            .find(|candidate| !exited_set.contains(candidate));
+        if let Some(replacement) = replacement {
+            state.layout.replace_buffer(id, replacement);
+        }
     }
+    resize_active(&mut state);
+    send_layout(&mut state);
+    send_snapshot(&mut state);
     Ok(false)
 }
 
@@ -555,6 +678,11 @@ fn output_loop(mut stream: UnixStream, receiver: mpsc::Receiver<Outgoing>) {
         match message {
             Outgoing::Bytes(bytes) => {
                 if write_frame(&mut stream, OUTPUT, &bytes).is_err() {
+                    break;
+                }
+            }
+            Outgoing::Layout(snapshot) => {
+                if write_frame(&mut stream, WINDOW_STATE, &snapshot).is_err() {
                     break;
                 }
             }
