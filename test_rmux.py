@@ -188,6 +188,28 @@ class Sessions(unittest.TestCase):
         os.write(fd3, b'exit\n')
         self.wait_for(lambda: self.run_rmux('ls').stdout == '')
 
+    def test_client_ctrl_t_and_ctrl_w_control_buffers(self):
+        process, fd = self.start('new', 'keybindings', '--', 'sh', '-i')
+        self.wait_for(lambda: self.run_rmux('ls').stdout == 'keybindings\n')
+        control = self.attach_control('keybindings')
+        try:
+            initial = self.read_layout(control)
+            self.assertEqual(initial['active_buffer'], 1)
+
+            os.write(fd, b'\x1b[116;5u')
+            created = self.read_layout(control)
+            self.assertEqual(created['active_buffer'], 2)
+
+            os.write(fd, b'\x1b[119;5u')
+            closed = self.read_layout(control)
+            self.assertEqual(closed['active_buffer'], 1)
+
+            os.write(fd, b'\x1b[119;5u')
+            self.wait_for(lambda: self.run_rmux('ls').stdout == '')
+            self.wait_for(lambda: process.poll() is not None)
+        finally:
+            control.close()
+
 
     def test_buffers_keep_independent_screen_and_process_state(self):
         self.env['SHELL'] = '/bin/sh'

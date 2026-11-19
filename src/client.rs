@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::Request;
+use crate::input::{InputAction, InputDecoder};
 use crate::render::{BUFFER_OUTPUT, BUFFER_SNAPSHOT, Renderer};
 use crate::runtime::{SessionPaths, read_response, write_request};
 use crate::server::{CLOSE, INPUT, RESIZE, WINDOW_STATE, read_frame, write_frame};
@@ -93,12 +94,19 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
     let mut last_resize_check = Instant::now();
     let mut input_buffer = [0u8; 16 * 1024];
     let mut renderer = Renderer::default();
+    let mut input_decoder = InputDecoder::default();
 
     loop {
         if interrupted.load(Ordering::Acquire) {
             let _ = write_frame(&mut server, 3, &[]);
             break;
         }
+        if let Some(action) = input_decoder.expire(Instant::now()) {
+            write_input_action(&mut server, action)?;
+        }
+        let timeout = input_decoder
+            .remaining_timeout(Instant::now())
+            .map_or(100, |remaining| remaining.as_millis().clamp(1, 100) as i32);
         let mut descriptors = [
             libc::pollfd {
                 fd: stdin_fd,
@@ -111,7 +119,8 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
                 revents: 0,
             },
         ];
-        let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, 100) };
+        let ready =
+            unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, timeout) };
         if ready < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
@@ -126,7 +135,7 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
                 let _ = write_frame(&mut server, 3, &[]);
                 break;
             }
-            write_frame(&mut server, INPUT, &input_buffer[..length])?;
+            send_input(&mut server, &mut input_decoder, &input_buffer[..length])?;
         }
         if descriptors[1].revents & libc::POLLIN != 0 {
             match read_frame(&mut server)? {
@@ -171,6 +180,23 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn send_input(server: &mut UnixStream, decoder: &mut InputDecoder, bytes: &[u8]) -> io::Result<()> {
+    if decoder.is_idle() && !bytes.contains(&b'\x1b') {
+        return write_frame(server, INPUT, bytes);
+    }
+    for action in decoder.feed(bytes) {
+        write_input_action(server, action)?;
+    }
+    Ok(())
+}
+
+fn write_input_action(server: &mut UnixStream, action: InputAction) -> io::Result<()> {
+    match action {
+        InputAction::Bytes(bytes) => write_frame(server, INPUT, &bytes),
+        InputAction::Command(command) => write_frame(server, command.kind, command.payload),
+    }
 }
 
 pub(crate) fn terminal_size() -> (u16, u16) {

@@ -1,4 +1,5 @@
 mod client;
+mod input;
 mod layout;
 mod render;
 mod runtime;
