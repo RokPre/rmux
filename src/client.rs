@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -6,10 +6,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::Request;
+use crate::render::{BUFFER_OUTPUT, BUFFER_SNAPSHOT, Renderer};
 use crate::runtime::{SessionPaths, read_response, write_request};
-use crate::server::{CLOSE, INPUT, OUTPUT, RESIZE, WINDOW_STATE, read_frame, write_frame};
+use crate::server::{CLOSE, INPUT, RESIZE, WINDOW_STATE, read_frame, write_frame};
 
 struct RawMode;
+struct TerminalScreen;
 
 impl RawMode {
     fn enable() -> io::Result<Self> {
@@ -21,6 +23,28 @@ impl RawMode {
 impl Drop for RawMode {
     fn drop(&mut self) {
         let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+impl TerminalScreen {
+    fn enter() -> io::Result<Self> {
+        crossterm::execute!(
+            io::stdout(),
+            crossterm::terminal::EnterAlternateScreen,
+            crossterm::cursor::Hide
+        )?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalScreen {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(
+            io::stdout(),
+            crossterm::style::ResetColor,
+            crossterm::cursor::Show,
+            crossterm::terminal::LeaveAlternateScreen
+        );
     }
 }
 
@@ -45,6 +69,7 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
     }
 
     let _raw_mode = RawMode::enable()?;
+    let _terminal_screen = TerminalScreen::enter()?;
     writer.set_read_timeout(None)?;
     writer.set_write_timeout(None)?;
     let mut server = reader.into_inner();
@@ -67,6 +92,7 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
     let mut last_size = (cols, rows);
     let mut last_resize_check = Instant::now();
     let mut input_buffer = [0u8; 16 * 1024];
+    let mut renderer = Renderer::default();
 
     loop {
         if interrupted.load(Ordering::Acquire) {
@@ -102,14 +128,22 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
             }
             write_frame(&mut server, INPUT, &input_buffer[..length])?;
         }
-
         if descriptors[1].revents & libc::POLLIN != 0 {
             match read_frame(&mut server)? {
-                Some((OUTPUT, bytes)) => {
-                    output.write_all(&bytes)?;
-                    output.flush()?;
+                Some((BUFFER_SNAPSHOT, bytes)) => {
+                    renderer.apply_frame(BUFFER_SNAPSHOT, &bytes)?;
+                    renderer.draw(&mut output, last_size.0, last_size.1)?;
                 }
-                Some((WINDOW_STATE, _)) => {}
+                Some((BUFFER_OUTPUT, bytes)) => {
+                    renderer.apply_frame(BUFFER_OUTPUT, &bytes)?;
+                    renderer.draw(&mut output, last_size.0, last_size.1)?;
+                }
+                Some((WINDOW_STATE, bytes)) => {
+                    let snapshot = serde_json::from_slice(&bytes)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    renderer.set_layout(snapshot);
+                    renderer.draw(&mut output, last_size.0, last_size.1)?;
+                }
                 Some((CLOSE, _)) | None => break,
                 Some(_) => {
                     return Err(io::Error::new(
@@ -132,11 +166,13 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
                 payload.extend_from_slice(&size.0.max(1).to_be_bytes());
                 write_frame(&mut server, RESIZE, &payload)?;
                 last_size = size;
+                renderer.draw(&mut output, last_size.0, last_size.1)?;
             }
         }
     }
     Ok(())
 }
+
 pub(crate) fn terminal_size() -> (u16, u16) {
     match crossterm::terminal::size() {
         Ok((cols, rows)) if cols > 0 && rows > 0 => (cols, rows),

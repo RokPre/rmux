@@ -12,7 +12,11 @@ from pathlib import Path
 
 RMUX = Path(__file__).with_name('rmux')
 INPUT = 1
+CLOSE = 2
 WINDOW_STATE = 3
+BUFFER_SNAPSHOT = 4
+BUFFER_OUTPUT = 5
+CLIENT_RESIZE = 2
 NEW_BUFFER = 4
 CLOSE_BUFFER = 5
 PREVIOUS_BUFFER = 6
@@ -52,20 +56,32 @@ class Sessions(unittest.TestCase):
         return subprocess.run([str(RMUX), *args], env=self.env, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
 
+    def drain_terminal_output(self, fd):
+        while True:
+            try:
+                os.read(fd, 4096)
+            except OSError:
+                return
+
     def start(self, *args):
         master, slave = pty.openpty()
         process = subprocess.Popen([str(RMUX), *args], env=self.env, stdin=slave,
                                    stdout=slave, stderr=slave, start_new_session=True)
         os.close(slave)
         self.clients.append((process, master))
+        threading.Thread(
+            target=self.drain_terminal_output,
+            args=(master,),
+            daemon=True,
+        ).start()
         return process, master
 
-    def attach_control(self, name):
+    def attach_control(self, name, rows=24, cols=80):
         sock = socket.socket(socket.AF_UNIX)
         sock.settimeout(8)
         sock.connect(str(Path(self.tmp.name, 'rmux-v2', 'sessions', f'{name}.sock')))
         request = json.dumps({
-            'op': 'attach', 'name': name, 'rows': 24, 'cols': 80,
+            'op': 'attach', 'name': name, 'rows': rows, 'cols': cols,
         }).encode() + b'\n'
         sock.sendall(request)
         response = bytearray()
@@ -99,9 +115,23 @@ class Sessions(unittest.TestCase):
             kind, payload = self.read_frame(sock)
             if kind == WINDOW_STATE:
                 return json.loads(payload)
-            if kind == 2:
+            if kind == CLOSE:
                 self.fail('session closed while waiting for layout state')
-            self.assertEqual(kind, 1)
+            self.assertIn(kind, (BUFFER_SNAPSHOT, BUFFER_OUTPUT))
+
+    def read_buffer_size(self, sock, buffer):
+        while True:
+            kind, payload = self.read_frame(sock)
+            if kind == CLOSE:
+                self.fail('session closed while waiting for buffer snapshot')
+            if kind == BUFFER_SNAPSHOT:
+                self.assertGreaterEqual(len(payload), 12)
+                if int.from_bytes(payload[:8], 'big') == buffer:
+                    rows = int.from_bytes(payload[8:10], 'big')
+                    cols = int.from_bytes(payload[10:12], 'big')
+                    return rows, cols
+            else:
+                self.assertIn(kind, (WINDOW_STATE, BUFFER_OUTPUT))
 
     def window_leaves(self, node):
         if node['kind'] == 'window':
@@ -113,12 +143,18 @@ class Sessions(unittest.TestCase):
         output = bytearray()
         while text not in output:
             kind, payload = self.read_frame(sock)
-            if kind == 3:
+            if kind == WINDOW_STATE:
                 continue
-            if kind == 2:
+            if kind == CLOSE:
                 self.fail('session closed while waiting for buffer output')
-            self.assertEqual(kind, 1)
-            output.extend(payload)
+            if kind == BUFFER_SNAPSHOT:
+                self.assertGreaterEqual(len(payload), 12)
+                output.extend(payload[12:])
+            elif kind == BUFFER_OUTPUT:
+                self.assertGreaterEqual(len(payload), 8)
+                output.extend(payload[8:])
+            else:
+                self.fail(f'unexpected server frame {kind}')
         return bytes(output)
 
 
@@ -310,6 +346,39 @@ class Sessions(unittest.TestCase):
             second.close()
             if last is not None:
                 last.close()
+
+    def test_buffer_size_uses_smallest_pane_across_clients(self):
+        self.start('new', 'geometry', '--', 'sh', '-i')
+        self.wait_for(lambda: self.run_rmux('ls').stdout == 'geometry\n')
+        large = self.attach_control('geometry', rows=24, cols=80)
+        small = None
+        try:
+            self.assertEqual(self.read_buffer_size(large, 1), (23, 80))
+
+            small = self.attach_control('geometry', rows=12, cols=50)
+            self.assertEqual(self.read_buffer_size(small, 1), (11, 50))
+            self.assertEqual(self.read_buffer_size(large, 1), (11, 50))
+
+            self.send_frame(large, SPLIT_VERTICAL)
+            split = self.read_layout(large)
+            self.assertEqual(split, self.read_layout(small))
+            self.assertEqual(self.read_buffer_size(large, 1), (11, 24))
+            self.assertEqual(self.read_buffer_size(small, 1), (11, 24))
+
+            resize = (10).to_bytes(2, 'big') + (30).to_bytes(2, 'big')
+            self.send_frame(small, CLIENT_RESIZE, resize)
+            self.assertEqual(self.read_buffer_size(large, 1), (9, 14))
+            self.assertEqual(self.read_buffer_size(small, 1), (9, 14))
+
+            self.send_frame(small, CLOSE_WINDOW)
+            single = self.read_layout(small)
+            self.assertEqual(single, self.read_layout(large))
+            self.assertEqual(self.read_buffer_size(large, 1), (9, 30))
+            self.assertEqual(self.read_buffer_size(small, 1), (9, 30))
+        finally:
+            large.close()
+            if small is not None:
+                small.close()
 
     def test_buffer_views_switch_close_and_exit_independently(self):
         self.env['SHELL'] = '/bin/sh'

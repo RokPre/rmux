@@ -1,6 +1,6 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Axis {
     Vertical,
@@ -27,9 +27,9 @@ impl Direction {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum WindowNode {
+pub(crate) enum WindowNode {
     Window {
         id: u64,
         buffer: u64,
@@ -42,10 +42,44 @@ enum WindowNode {
     },
 }
 
+#[derive(Serialize, Deserialize)]
+pub(crate) struct LayoutSnapshot {
+    pub(crate) tree: WindowNode,
+    pub(crate) focused_window: u64,
+    pub(crate) active_buffer: Option<u64>,
+    pub(crate) buffers: Vec<u64>,
+}
+
 pub(crate) struct WindowLayout {
     tree: WindowNode,
     focused_window: u64,
     next_window: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PaneRect {
+    pub(crate) x: u16,
+    pub(crate) y: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Divider {
+    Vertical { x: u16, top: u16, height: u16 },
+    Horizontal { y: u16, left: u16, width: u16 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WindowPlacement {
+    pub(crate) id: u64,
+    pub(crate) buffer: u64,
+    pub(crate) rect: PaneRect,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LayoutGeometry {
+    pub(crate) windows: Vec<WindowPlacement>,
+    pub(crate) dividers: Vec<Divider>,
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +88,11 @@ struct Rect {
     top: f64,
     right: f64,
     bottom: f64,
+}
+impl LayoutSnapshot {
+    pub(crate) fn geometry(&self, cols: u16, rows: u16) -> LayoutGeometry {
+        geometry(&self.tree, cols, rows)
+    }
 }
 
 impl WindowLayout {
@@ -66,6 +105,16 @@ impl WindowLayout {
             focused_window: 1,
             next_window: 2,
         }
+    }
+    pub(crate) fn geometry(&self, cols: u16, rows: u16) -> LayoutGeometry {
+        geometry(&self.tree, cols, rows)
+    }
+
+    pub(crate) fn visible_buffer_ids(&self) -> Vec<u64> {
+        visible_buffer_ids(&self.tree)
+    }
+    pub(crate) fn is_buffer_visible(&self, buffer: u64) -> bool {
+        contains_buffer(&self.tree, buffer)
     }
 
     pub(crate) fn focused_buffer(&self) -> Option<u64> {
@@ -148,20 +197,145 @@ impl WindowLayout {
     }
 
     pub(crate) fn snapshot(&self, buffers: &[u64]) -> Vec<u8> {
-        #[derive(Serialize)]
-        struct Snapshot<'a> {
-            tree: &'a WindowNode,
-            focused_window: u64,
-            active_buffer: Option<u64>,
-            buffers: &'a [u64],
-        }
-        serde_json::to_vec(&Snapshot {
-            tree: &self.tree,
+        serde_json::to_vec(&LayoutSnapshot {
+            tree: self.tree.clone(),
             focused_window: self.focused_window,
             active_buffer: self.focused_buffer(),
-            buffers,
+            buffers: buffers.to_vec(),
         })
         .expect("serializing a window layout cannot fail")
+    }
+}
+
+fn visible_buffer_ids(tree: &WindowNode) -> Vec<u64> {
+    fn collect(node: &WindowNode, buffers: &mut Vec<u64>) {
+        match node {
+            WindowNode::Window { buffer, .. } => {
+                if !buffers.contains(buffer) {
+                    buffers.push(*buffer);
+                }
+            }
+            WindowNode::Split { first, second, .. } => {
+                collect(first, buffers);
+                collect(second, buffers);
+            }
+        }
+    }
+
+    let mut buffers = Vec::new();
+    collect(tree, &mut buffers);
+    buffers
+}
+
+fn geometry(tree: &WindowNode, cols: u16, rows: u16) -> LayoutGeometry {
+    let y = if rows >= 3 { 1 } else { 0 };
+    let mut result = LayoutGeometry {
+        windows: Vec::new(),
+        dividers: Vec::new(),
+    };
+    collect_geometry(
+        tree,
+        PaneRect {
+            x: 0,
+            y,
+            width: cols,
+            height: rows.saturating_sub(y),
+        },
+        &mut result,
+    );
+    result
+}
+
+fn collect_geometry(node: &WindowNode, rect: PaneRect, out: &mut LayoutGeometry) {
+    match node {
+        WindowNode::Window { id, buffer } => out.windows.push(WindowPlacement {
+            id: *id,
+            buffer: *buffer,
+            rect,
+        }),
+        WindowNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => {
+            let extent = match axis {
+                Axis::Vertical => rect.width,
+                Axis::Horizontal => rect.height,
+            };
+            let has_divider = extent >= 3;
+            let available = if has_divider { extent - 1 } else { extent };
+            let first_extent = match extent {
+                0 => 0,
+                1 | 2 => 1,
+                _ => ((u32::from(available) * u32::from(*ratio)) / 100)
+                    .clamp(1, u32::from(available - 1)) as u16,
+            };
+            let second_extent = available - first_extent;
+            let second_offset = first_extent + if has_divider { 1 } else { 0 };
+            match axis {
+                Axis::Vertical => {
+                    if has_divider {
+                        out.dividers.push(Divider::Vertical {
+                            x: rect.x + first_extent,
+                            top: rect.y,
+                            height: rect.height,
+                        });
+                    }
+                    collect_geometry(
+                        first,
+                        PaneRect {
+                            width: first_extent,
+                            ..rect
+                        },
+                        out,
+                    );
+                    collect_geometry(
+                        second,
+                        PaneRect {
+                            x: rect.x + second_offset,
+                            width: second_extent,
+                            ..rect
+                        },
+                        out,
+                    );
+                }
+                Axis::Horizontal => {
+                    if has_divider {
+                        out.dividers.push(Divider::Horizontal {
+                            y: rect.y + first_extent,
+                            left: rect.x,
+                            width: rect.width,
+                        });
+                    }
+                    collect_geometry(
+                        first,
+                        PaneRect {
+                            height: first_extent,
+                            ..rect
+                        },
+                        out,
+                    );
+                    collect_geometry(
+                        second,
+                        PaneRect {
+                            y: rect.y + second_offset,
+                            height: second_extent,
+                            ..rect
+                        },
+                        out,
+                    );
+                }
+            }
+        }
+    }
+}
+fn contains_buffer(node: &WindowNode, id: u64) -> bool {
+    match node {
+        WindowNode::Window { buffer, .. } => *buffer == id,
+        WindowNode::Split { first, second, .. } => {
+            contains_buffer(first, id) || contains_buffer(second, id)
+        }
     }
 }
 
@@ -453,5 +627,112 @@ mod tests {
         assert_eq!(snapshot["tree"]["first"]["id"], 2);
         assert_eq!(snapshot["tree"]["second"]["first"]["id"], 1);
         assert_eq!(snapshot["tree"]["second"]["second"]["id"], 3);
+    }
+}
+#[cfg(test)]
+mod geometry_tests {
+    use super::{Axis, WindowLayout};
+
+    #[test]
+    fn geometry_places_nested_splits_and_dividers() {
+        let mut layout = WindowLayout::new(1);
+        assert!(layout.split_focused(Axis::Vertical));
+        assert!(layout.split_focused(Axis::Horizontal));
+
+        let geometry = layout.geometry(20, 10);
+        assert_eq!(
+            geometry.windows,
+            vec![
+                super::WindowPlacement {
+                    id: 1,
+                    buffer: 1,
+                    rect: super::PaneRect {
+                        x: 0,
+                        y: 1,
+                        width: 9,
+                        height: 9
+                    },
+                },
+                super::WindowPlacement {
+                    id: 2,
+                    buffer: 1,
+                    rect: super::PaneRect {
+                        x: 10,
+                        y: 1,
+                        width: 10,
+                        height: 4
+                    },
+                },
+                super::WindowPlacement {
+                    id: 3,
+                    buffer: 1,
+                    rect: super::PaneRect {
+                        x: 10,
+                        y: 6,
+                        width: 10,
+                        height: 4
+                    },
+                },
+            ]
+        );
+        assert_eq!(
+            geometry.dividers,
+            vec![
+                super::Divider::Vertical {
+                    x: 9,
+                    top: 1,
+                    height: 9
+                },
+                super::Divider::Horizontal {
+                    y: 5,
+                    left: 10,
+                    width: 10
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn geometry_handles_narrow_split_extents() {
+        let leaf = |id| super::WindowNode::Window { id, buffer: id };
+        let split = |axis| super::WindowNode::Split {
+            axis,
+            ratio: 50,
+            first: Box::new(leaf(1)),
+            second: Box::new(leaf(2)),
+        };
+
+        let geometry = super::geometry(&split(Axis::Vertical), 2, 2);
+        assert_eq!(geometry.windows[0].rect.width, 1);
+        assert_eq!(geometry.windows[1].rect.width, 1);
+        assert!(geometry.dividers.is_empty());
+
+        let geometry = super::geometry(&split(Axis::Vertical), 1, 2);
+        assert_eq!(geometry.windows[0].rect.width, 1);
+        assert_eq!(geometry.windows[1].rect.width, 0);
+        assert!(geometry.dividers.is_empty());
+
+        let geometry = super::geometry(&split(Axis::Vertical), 0, 2);
+        assert_eq!(geometry.windows[0].rect.width, 0);
+        assert_eq!(geometry.windows[1].rect.width, 0);
+        assert!(geometry.dividers.is_empty());
+    }
+
+    #[test]
+    fn visible_buffers_are_unique_in_leaf_order() {
+        let mut layout = WindowLayout::new(7);
+        assert!(layout.split_focused(Axis::Vertical));
+        assert!(layout.set_focused_buffer(8));
+        assert!(layout.split_focused(Axis::Horizontal));
+        assert!(layout.set_focused_buffer(7));
+
+        assert_eq!(layout.visible_buffer_ids(), vec![7, 8]);
+        assert!(layout.is_buffer_visible(8));
+        assert!(!layout.is_buffer_visible(9));
+
+        let snapshot: super::LayoutSnapshot =
+            serde_json::from_slice(&layout.snapshot(&[7, 8])).unwrap();
+        assert_eq!(snapshot.buffers, vec![7, 8]);
+        assert_eq!(snapshot.geometry(20, 10).windows.len(), 3);
     }
 }

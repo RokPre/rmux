@@ -1,5 +1,6 @@
 mod client;
 mod layout;
+mod render;
 mod runtime;
 mod server;
 

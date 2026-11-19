@@ -34,13 +34,15 @@ const MOVE_WINDOW: u8 = 12;
 const RESIZE_WINDOW: u8 = 13;
 const REORDER_BUFFER_LEFT: u8 = 14;
 const REORDER_BUFFER_RIGHT: u8 = 15;
-pub(crate) const OUTPUT: u8 = 1;
 pub(crate) const CLOSE: u8 = 2;
 pub(crate) const WINDOW_STATE: u8 = 3;
+pub(crate) const BUFFER_SNAPSHOT: u8 = 4;
+pub(crate) const BUFFER_OUTPUT: u8 = 5;
 const MAX_FRAME: usize = 1024 * 1024;
 
 pub(crate) enum Outgoing {
-    Bytes(Vec<u8>),
+    BufferSnapshot(Vec<u8>),
+    BufferOutput(Vec<u8>),
     Layout(Vec<u8>),
     Close,
 }
@@ -251,8 +253,11 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session: Arc<Session>, 
                     let mut state = lock_state(&session);
                     if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
                         buffer.parser.process(&output[..length]);
-                        if active_buffer(&state) == Some(buffer_id) {
-                            broadcast(&mut state, Outgoing::Bytes(output[..length].to_vec()));
+                        if state.layout.is_buffer_visible(buffer_id) {
+                            let mut payload = Vec::with_capacity(8 + length);
+                            payload.extend_from_slice(&buffer_id.to_be_bytes());
+                            payload.extend_from_slice(&output[..length]);
+                            broadcast(&mut state, Outgoing::BufferOutput(payload));
                         }
                     } else {
                         break;
@@ -279,7 +284,12 @@ fn broadcast(state: &mut SessionState, message: Outgoing) {
     let mut disconnected = Vec::new();
     for (&id, client) in &state.clients {
         let result = match &message {
-            Outgoing::Bytes(bytes) => client.sender.try_send(Outgoing::Bytes(bytes.clone())),
+            Outgoing::BufferSnapshot(bytes) => client
+                .sender
+                .try_send(Outgoing::BufferSnapshot(bytes.clone())),
+            Outgoing::BufferOutput(bytes) => client
+                .sender
+                .try_send(Outgoing::BufferOutput(bytes.clone())),
             Outgoing::Layout(bytes) => client.sender.try_send(Outgoing::Layout(bytes.clone())),
             Outgoing::Close => client.sender.try_send(Outgoing::Close),
         };
@@ -295,7 +305,7 @@ fn broadcast(state: &mut SessionState, message: Outgoing) {
         }
     }
     if removed_clients {
-        resize_active(state);
+        resize_visible_buffers(state);
     }
 }
 
@@ -353,9 +363,9 @@ fn attach_client(
                 cols,
             },
         );
-        resize_active(&mut state);
-        send_layout_to_client(&state, id);
-        send_snapshot(&mut state);
+        resize_visible_buffers(&mut state);
+        send_layout_to_client(&mut state, id);
+        send_visible_buffer_snapshots(&mut state);
     }
     thread::spawn(move || output_loop(output_stream, receiver));
 
@@ -381,7 +391,8 @@ fn attach_client(
                     client.rows = u16::from_be_bytes([payload[0], payload[1]]).max(1);
                     client.cols = u16::from_be_bytes([payload[2], payload[3]]).max(1);
                 }
-                resize_active(&mut state);
+                resize_visible_buffers(&mut state);
+                send_visible_buffer_snapshots(&mut state);
             }
             NEW_BUFFER if payload.is_empty() => create_buffer(&session),
             CLOSE_BUFFER if payload.is_empty() => close_active_buffer(&session),
@@ -405,7 +416,8 @@ fn attach_client(
         if let Some(client) = state.clients.remove(&id) {
             let _ = client.stream.shutdown(std::net::Shutdown::Both);
         }
-        resize_active(&mut state);
+        resize_visible_buffers(&mut state);
+        send_visible_buffer_snapshots(&mut state);
     }
     Ok(())
 }
@@ -415,12 +427,9 @@ fn create_buffer(session: &Arc<Session>) {
         let mut state = lock_state(session);
         let id = state.next_buffer;
         state.next_buffer = id.wrapping_add(1).max(1);
-        let size = current_size(&state)
-            .or_else(|| {
-                active_buffer(&state)
-                    .and_then(|active| state.buffers.get(&active))
-                    .and_then(|buffer| buffer.master.get_size().ok())
-            })
+        let size = active_buffer(&state)
+            .and_then(|active| state.buffers.get(&active))
+            .and_then(|buffer| buffer.master.get_size().ok())
             .unwrap_or(PtySize {
                 rows: 24,
                 cols: 80,
@@ -444,9 +453,9 @@ fn create_buffer(session: &Arc<Session>) {
         state.order.push(id);
         state.buffers.insert(id, buffer);
         state.layout.set_focused_buffer(id);
-        resize_active(&mut state);
+        resize_visible_buffers(&mut state);
         send_layout(&mut state);
-        send_snapshot(&mut state);
+        send_visible_buffer_snapshots(&mut state);
     }
     spawn_output_reader(reader, Arc::clone(session), id);
 }
@@ -474,9 +483,9 @@ fn close_active_buffer(session: &Session) {
     if let Some(mut buffer) = state.buffers.remove(&closing) {
         terminate_child(buffer.child.as_mut(), buffer.session_id);
     }
-    resize_active(&mut state);
+    resize_visible_buffers(&mut state);
     send_layout(&mut state);
-    send_snapshot(&mut state);
+    send_visible_buffer_snapshots(&mut state);
 }
 
 fn switch_buffer(session: &Session, next: bool) {
@@ -495,9 +504,9 @@ fn switch_buffer(session: &Session, next: bool) {
     };
     let buffer = state.order[new_index];
     state.layout.set_focused_buffer(buffer);
-    resize_active(&mut state);
+    resize_visible_buffers(&mut state);
     send_layout(&mut state);
-    send_snapshot(&mut state);
+    send_visible_buffer_snapshots(&mut state);
 }
 
 fn reorder_buffer(session: &Session, right: bool) {
@@ -523,18 +532,18 @@ fn reorder_buffer(session: &Session, right: bool) {
 fn split_focused(session: &Session, axis: Axis) {
     let mut state = lock_state(session);
     if state.layout.split_focused(axis) {
-        resize_active(&mut state);
+        resize_visible_buffers(&mut state);
         send_layout(&mut state);
-        send_snapshot(&mut state);
+        send_visible_buffer_snapshots(&mut state);
     }
 }
 
 fn close_focused_window(session: &Session) {
     let mut state = lock_state(session);
     if state.layout.close_focused_window() {
-        resize_active(&mut state);
+        resize_visible_buffers(&mut state);
         send_layout(&mut state);
-        send_snapshot(&mut state);
+        send_visible_buffer_snapshots(&mut state);
     }
 }
 
@@ -544,9 +553,7 @@ fn focus_window(session: &Session, encoded_direction: u8) {
     };
     let mut state = lock_state(session);
     if state.layout.focus_direction(direction) {
-        resize_active(&mut state);
         send_layout(&mut state);
-        send_snapshot(&mut state);
     }
 }
 
@@ -556,8 +563,9 @@ fn move_focused_window(session: &Session, encoded_direction: u8) {
     };
     let mut state = lock_state(session);
     if state.layout.move_focused_window(direction) {
+        resize_visible_buffers(&mut state);
         send_layout(&mut state);
-        send_snapshot(&mut state);
+        send_visible_buffer_snapshots(&mut state);
     }
 }
 
@@ -567,7 +575,9 @@ fn resize_focused_window(session: &Session, encoded_direction: u8) {
     };
     let mut state = lock_state(session);
     if state.layout.resize_focused_window(direction) {
+        resize_visible_buffers(&mut state);
         send_layout(&mut state);
+        send_visible_buffer_snapshots(&mut state);
     }
 }
 
@@ -575,58 +585,95 @@ fn send_layout(state: &mut SessionState) {
     let snapshot = state.layout.snapshot(&state.order);
     broadcast(state, Outgoing::Layout(snapshot));
 }
-fn send_layout_to_client(state: &SessionState, client_id: u64) {
+fn send_layout_to_client(state: &mut SessionState, id: u64) {
     let snapshot = state.layout.snapshot(&state.order);
-    if let Some(client) = state.clients.get(&client_id) {
+    if let Some(client) = state.clients.get(&id) {
         let _ = client.sender.try_send(Outgoing::Layout(snapshot));
     }
 }
+fn send_visible_buffer_snapshots(state: &mut SessionState) {
+    let snapshots: Vec<_> = state
+        .layout
+        .visible_buffer_ids()
+        .into_iter()
+        .filter_map(|id| {
+            state.buffers.get(&id).map(|buffer| {
+                let (rows, cols) = buffer.parser.screen().size();
+                (
+                    id,
+                    rows.get(),
+                    cols.get(),
+                    buffer.parser.screen().contents_formatted().into_bytes(),
+                )
+            })
+        })
+        .collect();
 
-fn send_snapshot(state: &mut SessionState) {
-    let snapshot = active_buffer(state)
-        .and_then(|active| state.buffers.get(&active))
-        .map(|buffer| buffer.parser.screen().contents_formatted().into_bytes());
-    if let Some(snapshot) = snapshot {
-        for chunk in snapshot.chunks(MAX_FRAME) {
-            broadcast(state, Outgoing::Bytes(chunk.to_vec()));
+    for (id, rows, cols, contents) in snapshots {
+        let mut offset = 0;
+        let mut first = true;
+        loop {
+            let end = (offset + MAX_FRAME - 12).min(contents.len());
+            let mut payload = Vec::with_capacity(12 + end - offset);
+            payload.extend_from_slice(&id.to_be_bytes());
+            payload.extend_from_slice(&rows.to_be_bytes());
+            payload.extend_from_slice(&cols.to_be_bytes());
+            payload.extend_from_slice(&contents[offset..end]);
+            let message = if first {
+                Outgoing::BufferSnapshot(payload)
+            } else {
+                Outgoing::BufferOutput(payload)
+            };
+            broadcast(state, message);
+            if end == contents.len() {
+                break;
+            }
+            offset = end;
+            first = false;
         }
     }
 }
 
-fn current_size(state: &SessionState) -> Option<PtySize> {
-    state
-        .clients
-        .values()
-        .fold(None::<(u16, u16)>, |size, client| {
-            Some(match size {
-                None => (client.rows, client.cols),
-                Some((rows, cols)) => (rows.min(client.rows), cols.min(client.cols)),
-            })
-        })
-        .map(|(rows, cols)| PtySize {
+fn resize_visible_buffers(state: &mut SessionState) {
+    let mut sizes = HashMap::<u64, (u16, u16)>::new();
+    for client in state.clients.values() {
+        for window in state.layout.geometry(client.cols, client.rows).windows {
+            let rows = window.rect.height.max(1);
+            let cols = window.rect.width.max(1);
+            let size = sizes.entry(window.buffer).or_insert((rows, cols));
+            size.0 = size.0.min(rows);
+            size.1 = size.1.min(cols);
+        }
+    }
+
+    for (id, (rows, cols)) in sizes {
+        let Some(buffer) = state.buffers.get_mut(&id) else {
+            continue;
+        };
+        let pty_size = PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
-        })
-}
-
-fn resize_active(state: &mut SessionState) {
-    let Some(size) = current_size(state) else {
-        return;
-    };
-    let Some(active) = state.layout.focused_buffer() else {
-        return;
-    };
-    if let Some(buffer) = state.buffers.get_mut(&active) {
-        let current = buffer.master.get_size().ok();
-        if !current.is_some_and(|current| current.rows == size.rows && current.cols == size.cols) {
-            let _ = buffer.master.resize(size);
+        };
+        let pty_matches = buffer
+            .master
+            .get_size()
+            .is_ok_and(|size| size.rows == rows && size.cols == cols);
+        let (screen_rows, screen_cols) = buffer.parser.screen().size();
+        let screen_matches = screen_rows.get() == rows && screen_cols.get() == cols;
+        if pty_matches && screen_matches {
+            continue;
         }
-        buffer.parser.set_size(
-            NonZeroU16::new(size.rows).unwrap_or(NonZeroU16::MIN),
-            NonZeroU16::new(size.cols).unwrap_or(NonZeroU16::MIN),
-        );
+        if !pty_matches && buffer.master.resize(pty_size).is_err() {
+            continue;
+        }
+        if !screen_matches {
+            buffer.parser.set_size(
+                NonZeroU16::new(rows).expect("pane rows are at least one"),
+                NonZeroU16::new(cols).expect("pane columns are at least one"),
+            );
+        }
     }
 }
 
@@ -667,17 +714,22 @@ fn reap_exited_buffers(session: &Session) -> io::Result<bool> {
             state.layout.replace_buffer(id, replacement);
         }
     }
-    resize_active(&mut state);
+    resize_visible_buffers(&mut state);
     send_layout(&mut state);
-    send_snapshot(&mut state);
+    send_visible_buffer_snapshots(&mut state);
     Ok(false)
 }
 
 fn output_loop(mut stream: UnixStream, receiver: mpsc::Receiver<Outgoing>) {
     while let Ok(message) = receiver.recv() {
         match message {
-            Outgoing::Bytes(bytes) => {
-                if write_frame(&mut stream, OUTPUT, &bytes).is_err() {
+            Outgoing::BufferSnapshot(bytes) => {
+                if write_frame(&mut stream, BUFFER_SNAPSHOT, &bytes).is_err() {
+                    break;
+                }
+            }
+            Outgoing::BufferOutput(bytes) => {
+                if write_frame(&mut stream, BUFFER_OUTPUT, &bytes).is_err() {
                     break;
                 }
             }
