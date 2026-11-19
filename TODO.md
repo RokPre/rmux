@@ -61,22 +61,22 @@
       - [x] TODO: Update st key handling if the chosen bindings require it [st_integration](#st_integration)
   - [ ] TODO: Verify and document the delivered interface [acceptance_stage](#acceptance_stage)
     - [ ] TODO: Verify the complete interactive contract [verification](#verification)
-      - [ ] TODO: Verify the existing CLI creation, attachment, listing and kill behavior [verify_cli](#verify_cli)
-      - [ ] TODO: Verify the real terminal and OMP launcher paths [verify_launchers](#verify_launchers)
-      - [ ] TODO: Verify session and buffers survive terminal disconnect and reattach [verify_detach](#verify_detach)
-      - [ ] TODO: Verify a hidden buffer keeps running and can be displayed again [verify_hidden](#verify_hidden)
-      - [ ] TODO: Verify both split directions initially show the same live buffer [verify_splits](#verify_splits)
-      - [ ] TODO: Verify switching one rmux window leaves another window buffer unchanged [verify_independent_switch](#verify_independent_switch)
-      - [ ] TODO: Verify closing windows preserves buffers and the last window stays open [verify_window_close](#verify_window_close)
-      - [ ] TODO: Verify buffer closure updates all views and the last buffer ends the session [verify_buffer_close](#verify_buffer_close)
-      - [ ] TODO: Verify buffer line navigation and reordering [verify_buffer_line](#verify_buffer_line)
-      - [ ] TODO: Verify directional window focus, movement and resizing [verify_window_controls](#verify_window_controls)
-      - [ ] TODO: Verify two attachments share layout, focus and actions [verify_shared_clients](#verify_shared_clients)
-      - [ ] TODO: Verify minimum buffer dimensions across views and differently sized clients [verify_shared_size](#verify_shared_size)
-      - [ ] TODO: Verify centered screen placement and background in larger views [verify_centering](#verify_centering)
-      - [ ] TODO: Verify application dimensions update after resize, view changes and detach [verify_resize_events](#verify_resize_events)
+      - [x] TODO: Verify the existing CLI creation, attachment, listing and kill behavior [verify_cli](#verify_cli)
+      - [x] TODO: Verify the real terminal and OMP launcher paths [verify_launchers](#verify_launchers)
+      - [x] TODO: Verify session and buffers survive terminal disconnect and reattach [verify_detach](#verify_detach)
+      - [x] TODO: Verify a hidden buffer keeps running and can be displayed again [verify_hidden](#verify_hidden)
+      - [x] TODO: Verify both split directions initially show the same live buffer [verify_splits](#verify_splits)
+      - [x] TODO: Verify switching one rmux window leaves another window buffer unchanged [verify_independent_switch](#verify_independent_switch)
+      - [x] TODO: Verify closing windows preserves buffers and the last window stays open [verify_window_close](#verify_window_close)
+      - [x] TODO: Verify buffer closure updates all views and the last buffer ends the session [verify_buffer_close](#verify_buffer_close)
+      - [x] TODO: Verify buffer line navigation and reordering [verify_buffer_line](#verify_buffer_line)
+      - [x] TODO: Verify directional window focus, movement and resizing [verify_window_controls](#verify_window_controls)
+      - [x] TODO: Verify two attachments share layout, focus and actions [verify_shared_clients](#verify_shared_clients)
+      - [x] TODO: Verify minimum buffer dimensions across views and differently sized clients [verify_shared_size](#verify_shared_size)
+      - [x] TODO: Verify centered screen placement and background in larger views [verify_centering](#verify_centering)
+      - [x] TODO: Verify application dimensions update after resize, view changes and detach [verify_resize_events](#verify_resize_events)
       - [ ] TODO: Verify the agreed key combinations through the actual st and i3 path [verify_keys](#verify_keys)
-      - [ ] TODO: Verify non-rmux input reaches interactive terminal applications [verify_application_input](#verify_application_input)
+      - [x] TODO: Verify non-rmux input reaches interactive terminal applications [verify_application_input](#verify_application_input)
     - [ ] TODO: Update user-facing usage [usage_docs](#usage_docs)
       - [ ] TODO: Document session, buffer and rmux window terminology [document_terms](#document_terms)
       - [ ] TODO: Document the supported keyboard controls and conflicts [document_controls](#document_controls)
@@ -595,6 +595,8 @@ Exercise real terminal clients, running programs and launcher entry points, incl
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
+
+Use a freshly built rmux client and the st build with the rmux keybinding patch, then launch a fresh session through the i3 terminal launcher. Exercise every agreed shortcut, verify ordinary input reaches a running shell, confirm Alt-W cannot close the last rmux window, and confirm the final Ctrl-W closes the session. Decoder tests and patch compilation alone do not complete this live check.
 
 ## verify_application_input
 

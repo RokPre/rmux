@@ -397,6 +397,9 @@ class Sessions(unittest.TestCase):
             self.assertEqual(single, self.read_layout(large))
             self.assertEqual(self.read_buffer_size(large, 1), (9, 30))
             self.assertEqual(self.read_buffer_size(small, 1), (9, 30))
+            small.close()
+            small = None
+            self.assertEqual(self.read_buffer_size(large, 1), (23, 80))
         finally:
             large.close()
             if small is not None:
