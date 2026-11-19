@@ -2,8 +2,6 @@ import fcntl
 import json
 import os
 import pty
-import select
-import signal
 import socket
 import subprocess
 import tempfile
@@ -48,6 +46,52 @@ class Sessions(unittest.TestCase):
         self.clients.append((process, master))
         return process, master
 
+    def attach_control(self, name):
+        sock = socket.socket(socket.AF_UNIX)
+        sock.settimeout(8)
+        sock.connect(str(Path(self.tmp.name, 'rmux-v2', 'sessions', f'{name}.sock')))
+        request = json.dumps({
+            'op': 'attach', 'name': name, 'rows': 24, 'cols': 80,
+        }).encode() + b'\n'
+        sock.sendall(request)
+        response = bytearray()
+        while not response.endswith(b'\n'):
+            chunk = sock.recv(1)
+            if not chunk:
+                raise EOFError('session closed before attach response')
+            response.extend(chunk)
+        self.assertTrue(json.loads(response)['ok'])
+        return sock
+
+    def send_frame(self, sock, kind, payload=b''):
+        sock.sendall(bytes([kind]) + len(payload).to_bytes(4, 'big') + payload)
+
+    def read_exact(self, sock, length):
+        data = bytearray()
+        while len(data) < length:
+            chunk = sock.recv(length - len(data))
+            if not chunk:
+                raise EOFError('session closed during frame')
+            data.extend(chunk)
+        return bytes(data)
+
+    def read_frame(self, sock):
+        header = self.read_exact(sock, 5)
+        size = int.from_bytes(header[1:], 'big')
+        payload = self.read_exact(sock, size)
+        return header[0], payload
+
+    def receive_until(self, sock, text):
+        output = bytearray()
+        while text not in output:
+            kind, payload = self.read_frame(sock)
+            if kind == 2:
+                self.fail('session closed while waiting for buffer output')
+            self.assertEqual(kind, 1)
+            output.extend(payload)
+        return bytes(output)
+
+
     def wait_for(self, predicate):
         for _ in range(100):
             if predicate():
@@ -77,6 +121,61 @@ class Sessions(unittest.TestCase):
         self.wait_for(lambda: self.run_rmux('ls').stdout == 'demo\n')
         os.write(fd3, b'exit\n')
         self.wait_for(lambda: self.run_rmux('ls').stdout == '')
+
+
+    def test_buffers_keep_independent_screen_and_process_state(self):
+        self.env['SHELL'] = '/bin/sh'
+        process, fd = self.start('new', 'buffers', '--', 'sh', '-i')
+        self.wait_for(lambda: 'buffers' in self.run_rmux('ls').stdout.splitlines())
+        os.write(fd, b'echo FIRST_BUFFER_MARKER\n')
+        control = self.attach_control('buffers')
+        try:
+            self.assertIn(b'FIRST_BUFFER_MARKER', self.receive_until(
+                control, b'FIRST_BUFFER_MARKER'))
+            self.send_frame(control, 4)
+            pidfile = Path(self.tmp.name, 'buffer-child.pid')
+            command = (
+                b'echo SECOND_BUFFER_VISIBLE; '
+                b'(sleep 2; echo SECOND_BUFFER_HIDDEN) & '
+                b'sleep 60 & echo $! > ' + str(pidfile).encode() + b'; wait\n'
+            )
+            self.send_frame(control, 1, command)
+            second_visible = self.receive_until(control, b'SECOND_BUFFER_VISIBLE')
+            self.assertIn(b'SECOND_BUFFER_VISIBLE', second_visible)
+            self.send_frame(control, 6)
+            first_screen = self.receive_until(control, b'FIRST_BUFFER_MARKER')
+            self.assertNotIn(b'SECOND_BUFFER_VISIBLE', first_screen)
+            time.sleep(2.2)
+            self.send_frame(control, 7)
+            second_screen = self.receive_until(control, b'SECOND_BUFFER_HIDDEN')
+            self.assertIn(b'SECOND_BUFFER_VISIBLE', second_screen)
+            self.wait_for(pidfile.exists)
+            child_pid = int(pidfile.read_text())
+
+            self.send_frame(control, 5)
+            self.assertIn(b'FIRST_BUFFER_MARKER', self.receive_until(
+                control, b'FIRST_BUFFER_MARKER'))
+
+            def stopped():
+                try:
+                    state = Path(f'/proc/{child_pid}/stat').read_text().split(') ')[1][0]
+                    return state == 'Z'
+                except FileNotFoundError:
+                    return True
+            self.wait_for(stopped)
+            self.assertEqual(self.run_rmux('ls').stdout, 'buffers\n')
+
+            self.send_frame(control, 4)
+            self.send_frame(control, 1, b'exit\n')
+            self.assertIn(b'FIRST_BUFFER_MARKER', self.receive_until(
+                control, b'FIRST_BUFFER_MARKER'))
+            self.assertEqual(self.run_rmux('ls').stdout, 'buffers\n')
+
+            self.send_frame(control, 5)
+            self.wait_for(lambda: self.run_rmux('ls').stdout == '')
+            self.wait_for(lambda: process.poll() is not None)
+        finally:
+            control.close()
 
     def test_stale_hidden_and_invalid_names(self):
         self.run_rmux('ls')

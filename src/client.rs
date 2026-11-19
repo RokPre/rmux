@@ -124,7 +124,7 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
 
         if last_resize_check.elapsed() >= Duration::from_millis(200) {
             last_resize_check = Instant::now();
-            let size = crossterm::terminal::size().unwrap_or(last_size);
+            let size = terminal_size();
             if size != last_size {
                 let mut payload = Vec::with_capacity(4);
                 payload.extend_from_slice(&size.1.max(1).to_be_bytes());
@@ -137,7 +137,8 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
     Ok(())
 }
 pub(crate) fn terminal_size() -> (u16, u16) {
-    crossterm::terminal::size()
-        .map(|(cols, rows)| (cols.max(1), rows.max(1)))
-        .unwrap_or((80, 24))
+    match crossterm::terminal::size() {
+        Ok((cols, rows)) if cols > 0 && rows > 0 => (cols, rows),
+        _ => (80, 24),
+    }
 }
