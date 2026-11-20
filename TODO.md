@@ -1,99 +1,401 @@
 # TODOs
 
-- [ ] TODO: Deliver interactive rmux sessions [interactive_mux](#interactive_mux)
-  - [x] TODO: Decide the interactive architecture [design_stage](#design_stage)
-    - [x] TODO: Determine the implementation architecture [architecture](#architecture)
-      - [x] TODO: Inspect the existing CLI and launcher contracts [inspect_contract](#inspect_contract)
-      - [x] TODO: Assess terminal emulation and multiplexer implementation options [assess_engines](#assess_engines)
-      - [x] TODO: Assess whether dtach can support the required session model [assess_dtach](#assess_dtach)
-      - [x] TODO: Inspect st key mappings and window-manager interception [inspect_st_keys](#inspect_st_keys)
-      - [x] TODO: Choose the session, client and terminal architecture [select_design](#select_design)
-  - [x] TODO: Deliver persistent session and buffer runtime [runtime_stage](#runtime_stage)
-    - [x] TODO: Implement named session runtime [session_runtime](#session_runtime)
-      - [x] TODO: Implement existing new, up, attach, ls and kill commands [preserve_cli](#preserve_cli)
-      - [x] TODO: Create the persistent session process [session_server](#session_server)
-      - [x] TODO: Connect an interactive client to a named session [client_attach](#client_attach)
-      - [x] TODO: Keep the session running when a terminal disconnects [client_detach](#client_detach)
-      - [x] TODO: Track simultaneous attached terminal clients [attachment_tracking](#attachment_tracking)
-      - [x] TODO: Clean up session resources after session termination [session_cleanup](#session_cleanup)
-      - [x] TODO: Adapt affected terminal and OMP launchers to the new runtime [launcher_migration](#launcher_migration)
-    - [x] TODO: Implement terminal buffers [buffer_runtime](#buffer_runtime)
-      - [x] TODO: Start a terminal program for a new buffer [buffer_process](#buffer_process)
-      - [x] TODO: Maintain the terminal screen state for each buffer [terminal_state](#terminal_state)
-      - [x] TODO: Keep an undisplayed buffer running [hidden_buffer](#hidden_buffer)
-      - [x] TODO: Maintain the ordered buffer list [buffer_order](#buffer_order)
-      - [x] TODO: Terminate the selected buffer and its program [buffer_close](#buffer_close)
-      - [x] TODO: Remove a buffer when its program exits [buffer_exit](#buffer_exit)
-      - [x] TODO: End the session when its last buffer closes [final_buffer](#final_buffer)
-  - [x] TODO: Deliver shared interactive views [interface_stage](#interface_stage)
-    - [x] TODO: Implement shared rmux windows [window_layout](#window_layout)
-      - [x] TODO: Display the initial buffer in one rmux window [initial_window](#initial_window)
-      - [x] TODO: Split a window vertically showing its existing buffer [vertical_split](#vertical_split)
-      - [x] TODO: Split a window horizontally showing its existing buffer [horizontal_split](#horizontal_split)
-      - [x] TODO: Close an rmux window without closing its buffer [close_window](#close_window)
-      - [x] TODO: Ignore window-close requests for the final rmux window [last_window](#last_window)
-      - [x] TODO: Move focus between adjacent windows by direction [focus_window](#focus_window)
-      - [x] TODO: Move the focused window in the requested direction [move_window](#move_window)
-      - [x] TODO: Resize the focused window in the requested direction [resize_window](#resize_window)
-      - [x] TODO: Switch the focused window to the previous or next buffer [switch_buffer](#switch_buffer)
-      - [x] TODO: Move the focused buffer left or right in the buffer list [reorder_buffer](#reorder_buffer)
-      - [x] TODO: Show a newly created buffer in the focused window [new_buffer_view](#new_buffer_view)
-      - [x] TODO: Replace a closed buffer in every window displaying it [closed_buffer_views](#closed_buffer_views)
-    - [x] TODO: Render shared sessions across attached terminals [presentation](#presentation)
-      - [x] TODO: Render the shared window layout for each attached terminal [render_layout](#render_layout)
-      - [x] TODO: Render the ordered buffer line with the focused buffer identified [buffer_line](#buffer_line)
-      - [x] TODO: Compute each displayed buffer size from the minimum view width and height across all clients [buffer_geometry](#buffer_geometry)
-      - [x] TODO: Notify the buffer program when its terminal size changes [notify_resize](#notify_resize)
-      - [x] TODO: Center each buffer screen within a larger rmux window [centered_view](#centered_view)
-      - [x] TODO: Fill unused window space with a background pattern [background_pattern](#background_pattern)
-      - [x] TODO: Recalculate buffer sizes when views, attachments or terminal sizes change [geometry_updates](#geometry_updates)
-      - [x] TODO: Propagate shared layout, focus and buffer changes to all attached clients [shared_redraw](#shared_redraw)
-    - [x] TODO: Implement interactive keyboard controls [input_controls](#input_controls)
-      - [x] TODO: Choose a distinguishable input encoding and application key-passthrough policy [key_protocol](#key_protocol)
-      - [x] TODO: Bind Ctrl-T and Ctrl-W to buffer creation and closure [buffer_keys](#buffer_keys)
-      - [x] TODO: Bind Ctrl-H and Ctrl-L to buffer navigation [buffer_navigation_keys](#buffer_navigation_keys)
-      - [x] TODO: Bind Ctrl-Shift-H and Ctrl-Shift-L to buffer reordering [buffer_move_keys](#buffer_move_keys)
-      - [x] TODO: Bind Alt-V and Alt-B to vertical and horizontal splits [window_split_keys](#window_split_keys)
-      - [x] TODO: Bind Alt-W to closing an rmux window [window_close_key](#window_close_key)
-      - [x] TODO: Bind Alt-H, J, K and L to directional window focus [window_focus_keys](#window_focus_keys)
-      - [x] TODO: Bind Alt-Shift directional keys to window movement [window_move_keys](#window_move_keys)
-      - [x] TODO: Bind Alt-Ctrl directional keys to window resizing [window_size_keys](#window_size_keys)
-      - [x] TODO: Update st key handling if the chosen bindings require it [st_integration](#st_integration)
-    - [x] TODO: Add user-visible names for terminal buffers [buffer_rename](#buffer_rename)
-      - [x] TODO: Track display names alongside buffer IDs [buffer_name_state](#buffer_name_state)
-      - [x] TODO: Rename the active buffer with Ctrl-R [rename_buffer_key](#rename_buffer_key)
-    - [x] TODO: Equalize the sizes of rmux windows [equalize_windows](#equalize_windows)
-      - [x] TODO: Rebalance split ratios across visible windows [equalize_layout](#equalize_layout)
-      - [x] TODO: Bind window equalization to Alt+= [equalize_key](#equalize_key)
-  - [ ] TODO: Verify and document the delivered interface [acceptance_stage](#acceptance_stage)
-    - [ ] TODO: Verify the complete interactive contract [verification](#verification)
-      - [x] TODO: Verify the existing CLI creation, attachment, listing and kill behavior [verify_cli](#verify_cli)
-      - [x] TODO: Verify the real terminal and OMP launcher paths [verify_launchers](#verify_launchers)
-      - [x] TODO: Verify session and buffers survive terminal disconnect and reattach [verify_detach](#verify_detach)
-      - [x] TODO: Verify a hidden buffer keeps running and can be displayed again [verify_hidden](#verify_hidden)
-      - [x] TODO: Verify both split directions initially show the same live buffer [verify_splits](#verify_splits)
-      - [x] TODO: Verify switching one rmux window leaves another window buffer unchanged [verify_independent_switch](#verify_independent_switch)
-      - [x] TODO: Verify closing windows preserves buffers and the last window stays open [verify_window_close](#verify_window_close)
-      - [x] TODO: Verify buffer closure updates all views and the last buffer ends the session [verify_buffer_close](#verify_buffer_close)
-      - [x] TODO: Verify buffer line navigation and reordering [verify_buffer_line](#verify_buffer_line)
-      - [x] TODO: Verify directional window focus, movement and resizing [verify_window_controls](#verify_window_controls)
-      - [x] TODO: Verify two attachments share layout, focus and actions [verify_shared_clients](#verify_shared_clients)
-      - [x] TODO: Verify minimum buffer dimensions across views and differently sized clients [verify_shared_size](#verify_shared_size)
-      - [x] TODO: Verify centered screen placement and background in larger views [verify_centering](#verify_centering)
-      - [x] TODO: Verify application dimensions update after resize, view changes and detach [verify_resize_events](#verify_resize_events)
-      - [ ] TODO: Verify the agreed key combinations through the actual st and i3 path [verify_keys](#verify_keys)
-      - [x] TODO: Verify non-rmux input reaches interactive terminal applications [verify_application_input](#verify_application_input)
-      - [ ] TODO: Check whether rmux needs the custom st key patch [verify_st_patch](#verify_st_patch)
-      - [x] TODO: Verify buffer rename behavior [verify_buffer_rename](#verify_buffer_rename)
-      - [ ] TODO: Verify rmux window equalization [verify_equalize](#verify_equalize)
-      - [x] TODO: Verify Atuin cursor-position queries [verify_atuin](#verify_atuin)
-      - [x] TODO: Verify first pane text colors [verify_pane_color](#verify_pane_color)
-    - [ ] TODO: Update user-facing usage [usage_docs](#usage_docs)
-      - [ ] TODO: Document session, buffer and rmux window terminology [document_terms](#document_terms)
-      - [ ] TODO: Document the supported keyboard controls and conflicts [document_controls](#document_controls)
-      - [ ] TODO: Document session, buffer and window lifetime behavior [document_lifecycle](#document_lifecycle)
-      - [ ] TODO: Document shared attachments and buffer sizing [document_views](#document_views)
 
+
+# DONEs
+
+- [x] DONE: Deliver persistent rmux sessions [rmux](#rmux)
+  - [x] DONE: Implement and integrate rmux [delivery](#delivery)
+    - [x] DONE: Build and verify the Bash CLI [cli](#cli)
+      - [x] DONE: Choose private runtime socket storage [runtime](#runtime)
+      - [x] DONE: Parse and validate CLI arguments [arguments](#arguments)
+      - [x] DONE: Implement safe socket liveness handling [liveness](#liveness)
+      - [x] DONE: Implement session commands [sessions](#sessions)
+      - [x] DONE: Test disconnect and reconnect [reconnect](#reconnect)
+      - [x] DONE: Test live and stale sockets [stale](#stale)
+      - [x] DONE: Test command and working directory [cwd](#cwd)
+      - [x] DONE: Test attach-or-create behavior [up](#up)
+      - [x] DONE: Test session exit and reuse [exit](#exit)
+    - [x] DONE: Integrate and verify dotfiles launchers [integration](#integration)
+      - [x] DONE: Make rmux available to launchers [path](#path)
+      - [x] DONE: Switch the terminal launcher [terminal](#terminal)
+      - [x] DONE: Switch the OMP launcher [omp](#omp)
+      - [x] DONE: Test the real launcher paths [launcher_test](#launcher_test)
+      - [x] DONE: Document rmux usage [docs](#docs)
+
+- [x] DONE: Deliver named session termination [kill_feature](#kill_feature)
+  - [x] DONE: Implement session termination [kill_change](#kill_change)
+    - [x] DONE: Build and verify the kill command [kill_session](#kill_session)
+      - [x] DONE: Determine safe termination mechanism [kill_method](#kill_method)
+      - [x] DONE: Implement the kill command [kill_command](#kill_command)
+      - [x] DONE: Update command usage [kill_usage](#kill_usage)
+      - [x] DONE: Test terminating a live session [kill_live_test](#kill_live_test)
+      - [x] DONE: Test attached clients and isolation [kill_clients_test](#kill_clients_test)
+      - [x] DONE: Test termination error cases [kill_errors_test](#kill_errors_test)
+      - [x] DONE: Test session lifecycle races [kill_race_test](#kill_race_test)
+
+- [x] DONE: Select or create sessions in both launchers [session_picker](#session_picker)
+  - [x] DONE: Deliver session selection for both launchers [picker_delivery](#picker_delivery)
+    - [x] DONE: Implement and verify session selection [picker_work](#picker_work)
+      - [x] DONE: Identify current session naming and creation [picker_naming](#picker_naming)
+      - [x] DONE: List existing rmux sessions [picker_list](#picker_list)
+      - [x] DONE: Filter sessions for the selected checkout [picker_filter](#picker_filter)
+      - [x] DONE: Create a clean session when none exists [picker_empty](#picker_empty)
+      - [x] DONE: Offer existing sessions and new session [picker_choice](#picker_choice)
+      - [x] DONE: Create an additional suffixed session [picker_new](#picker_new)
+      - [x] DONE: Verify both launcher workflows [picker_verify](#picker_verify)
+
+- [x] DONE: Deliver interactive rmux sessions [interactive_mux](#interactive_mux)
+  - [x] DONE: Decide the interactive architecture [design_stage](#design_stage)
+    - [x] DONE: Determine the implementation architecture [architecture](#architecture)
+      - [x] DONE: Inspect the existing CLI and launcher contracts [inspect_contract](#inspect_contract)
+      - [x] DONE: Assess terminal emulation and multiplexer implementation options [assess_engines](#assess_engines)
+      - [x] DONE: Assess whether dtach can support the required session model [assess_dtach](#assess_dtach)
+      - [x] DONE: Inspect st key mappings and window-manager interception [inspect_st_keys](#inspect_st_keys)
+      - [x] DONE: Choose the session, client and terminal architecture [select_design](#select_design)
+  - [x] DONE: Deliver persistent session and buffer runtime [runtime_stage](#runtime_stage)
+    - [x] DONE: Implement named session runtime [session_runtime](#session_runtime)
+      - [x] DONE: Implement existing new, up, attach, ls and kill commands [preserve_cli](#preserve_cli)
+      - [x] DONE: Create the persistent session process [session_server](#session_server)
+      - [x] DONE: Connect an interactive client to a named session [client_attach](#client_attach)
+      - [x] DONE: Keep the session running when a terminal disconnects [client_detach](#client_detach)
+      - [x] DONE: Track simultaneous attached terminal clients [attachment_tracking](#attachment_tracking)
+      - [x] DONE: Clean up session resources after session termination [session_cleanup](#session_cleanup)
+      - [x] DONE: Adapt affected terminal and OMP launchers to the new runtime [launcher_migration](#launcher_migration)
+    - [x] DONE: Implement terminal buffers [buffer_runtime](#buffer_runtime)
+      - [x] DONE: Start a terminal program for a new buffer [buffer_process](#buffer_process)
+      - [x] DONE: Maintain the terminal screen state for each buffer [terminal_state](#terminal_state)
+      - [x] DONE: Keep an undisplayed buffer running [hidden_buffer](#hidden_buffer)
+      - [x] DONE: Maintain the ordered buffer list [buffer_order](#buffer_order)
+      - [x] DONE: Terminate the selected buffer and its program [buffer_close](#buffer_close)
+      - [x] DONE: Remove a buffer when its program exits [buffer_exit](#buffer_exit)
+      - [x] DONE: End the session when its last buffer closes [final_buffer](#final_buffer)
+  - [x] DONE: Deliver shared interactive views [interface_stage](#interface_stage)
+    - [x] DONE: Implement shared rmux windows [window_layout](#window_layout)
+      - [x] DONE: Display the initial buffer in one rmux window [initial_window](#initial_window)
+      - [x] DONE: Split a window vertically showing its existing buffer [vertical_split](#vertical_split)
+      - [x] DONE: Split a window horizontally showing its existing buffer [horizontal_split](#horizontal_split)
+      - [x] DONE: Close an rmux window without closing its buffer [close_window](#close_window)
+      - [x] DONE: Ignore window-close requests for the final rmux window [last_window](#last_window)
+      - [x] DONE: Move focus between adjacent windows by direction [focus_window](#focus_window)
+      - [x] DONE: Move the focused window in the requested direction [move_window](#move_window)
+      - [x] DONE: Resize the focused window in the requested direction [resize_window](#resize_window)
+      - [x] DONE: Switch the focused window to the previous or next buffer [switch_buffer](#switch_buffer)
+      - [x] DONE: Move the focused buffer left or right in the buffer list [reorder_buffer](#reorder_buffer)
+      - [x] DONE: Show a newly created buffer in the focused window [new_buffer_view](#new_buffer_view)
+      - [x] DONE: Replace a closed buffer in every window displaying it [closed_buffer_views](#closed_buffer_views)
+    - [x] DONE: Render shared sessions across attached terminals [presentation](#presentation)
+      - [x] DONE: Render the shared window layout for each attached terminal [render_layout](#render_layout)
+      - [x] DONE: Render the ordered buffer line with the focused buffer identified [buffer_line](#buffer_line)
+      - [x] DONE: Compute each displayed buffer size from the minimum view width and height across all clients [buffer_geometry](#buffer_geometry)
+      - [x] DONE: Notify the buffer program when its terminal size changes [notify_resize](#notify_resize)
+      - [x] DONE: Center each buffer screen within a larger rmux window [centered_view](#centered_view)
+      - [x] DONE: Fill unused window space with a background pattern [background_pattern](#background_pattern)
+      - [x] DONE: Recalculate buffer sizes when views, attachments or terminal sizes change [geometry_updates](#geometry_updates)
+      - [x] DONE: Propagate shared layout, focus and buffer changes to all attached clients [shared_redraw](#shared_redraw)
+    - [x] DONE: Implement interactive keyboard controls [input_controls](#input_controls)
+      - [x] DONE: Choose a distinguishable input encoding and application key-passthrough policy [key_protocol](#key_protocol)
+      - [x] DONE: Bind Ctrl-T and Ctrl-W to buffer creation and closure [buffer_keys](#buffer_keys)
+      - [x] DONE: Bind Ctrl-H and Ctrl-L to buffer navigation [buffer_navigation_keys](#buffer_navigation_keys)
+      - [x] DONE: Bind Ctrl-Shift-H and Ctrl-Shift-L to buffer reordering [buffer_move_keys](#buffer_move_keys)
+      - [x] DONE: Bind Alt-V and Alt-B to vertical and horizontal splits [window_split_keys](#window_split_keys)
+      - [x] DONE: Bind Alt-W to closing an rmux window [window_close_key](#window_close_key)
+      - [x] DONE: Bind Alt-H, J, K and L to directional window focus [window_focus_keys](#window_focus_keys)
+      - [x] DONE: Bind Alt-Shift directional keys to window movement [window_move_keys](#window_move_keys)
+      - [x] DONE: Bind Alt-Ctrl directional keys to window resizing [window_size_keys](#window_size_keys)
+      - [x] DONE: Update st key handling if the chosen bindings require it [st_integration](#st_integration)
+    - [x] DONE: Add user-visible names for terminal buffers [buffer_rename](#buffer_rename)
+      - [x] DONE: Track display names alongside buffer IDs [buffer_name_state](#buffer_name_state)
+      - [x] DONE: Rename the active buffer with Ctrl-R [rename_buffer_key](#rename_buffer_key)
+    - [x] DONE: Equalize the sizes of rmux windows [equalize_windows](#equalize_windows)
+      - [x] DONE: Rebalance split ratios across visible windows [equalize_layout](#equalize_layout)
+      - [x] DONE: Bind window equalization to Alt+= [equalize_key](#equalize_key)
+  - [x] DONE: Verify and document the delivered interface [acceptance_stage](#acceptance_stage)
+    - [x] DONE: Verify the complete interactive contract [verification](#verification)
+      - [x] DONE: Verify the existing CLI creation, attachment, listing and kill behavior [verify_cli](#verify_cli)
+      - [x] DONE: Verify the real terminal and OMP launcher paths [verify_launchers](#verify_launchers)
+      - [x] DONE: Verify session and buffers survive terminal disconnect and reattach [verify_detach](#verify_detach)
+      - [x] DONE: Verify a hidden buffer keeps running and can be displayed again [verify_hidden](#verify_hidden)
+      - [x] DONE: Verify both split directions initially show the same live buffer [verify_splits](#verify_splits)
+      - [x] DONE: Verify switching one rmux window leaves another window buffer unchanged [verify_independent_switch](#verify_independent_switch)
+      - [x] DONE: Verify closing windows preserves buffers and the last window stays open [verify_window_close](#verify_window_close)
+      - [x] DONE: Verify buffer closure updates all views and the last buffer ends the session [verify_buffer_close](#verify_buffer_close)
+      - [x] DONE: Verify buffer line navigation and reordering [verify_buffer_line](#verify_buffer_line)
+      - [x] DONE: Verify directional window focus, movement and resizing [verify_window_controls](#verify_window_controls)
+      - [x] DONE: Verify two attachments share layout, focus and actions [verify_shared_clients](#verify_shared_clients)
+      - [x] DONE: Verify minimum buffer dimensions across views and differently sized clients [verify_shared_size](#verify_shared_size)
+      - [x] DONE: Verify centered screen placement and background in larger views [verify_centering](#verify_centering)
+      - [x] DONE: Verify application dimensions update after resize, view changes and detach [verify_resize_events](#verify_resize_events)
+      - [x] DONE: Verify the agreed key combinations through the actual st and i3 path [verify_keys](#verify_keys)
+      - [x] DONE: Verify non-rmux input reaches interactive terminal applications [verify_application_input](#verify_application_input)
+      - [x] DONE: Check whether rmux needs the custom st key patch [verify_st_patch](#verify_st_patch)
+      - [x] DONE: Verify buffer rename behavior [verify_buffer_rename](#verify_buffer_rename)
+      - [x] DONE: Verify rmux window equalization [verify_equalize](#verify_equalize)
+      - [x] DONE: Verify Atuin cursor-position queries [verify_atuin](#verify_atuin)
+      - [x] DONE: Verify first pane text colors [verify_pane_color](#verify_pane_color)
+    - [x] DONE: Update user-facing usage [usage_docs](#usage_docs)
+      - [x] DONE: Document session, buffer and rmux window terminology [document_terms](#document_terms)
+      - [x] DONE: Document the supported keyboard controls and conflicts [document_controls](#document_controls)
+      - [x] DONE: Document session, buffer and window lifetime behavior [document_lifecycle](#document_lifecycle)
+      - [x] DONE: Document shared attachments and buffer sizing [document_views](#document_views)
+## rmux
+
+- Role: material
+- Scope: coordinated
+- Difficulty: 3 kyu
+- Children: delivery
+
+Implement and integrate the full specification as one material. Difficulty lies in safe lifecycle management and real interactive launcher verification; there are no prerequisites.
+
+## delivery
+
+- Role: composite
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: cli & integration
+
+One coherent change spanning the CLI, session tests, and dotfiles integration. CLI behavior must be verified before launcher integration.
+
+## cli
+
+- Role: molecule
+- Scope: local
+- Difficulty: 4 kyu
+- Children: runtime & arguments & liveness & sessions & reconnect & stale & cwd & up & exit
+
+Provide the specified dtach session lifecycle and verify it with real terminal clients. Liveness and creation races are the main risks; no prerequisites.
+
+## runtime
+
+- Role: atomic
+
+Create user-specific runtime storage with safe permissions; sessions must not survive reboot.
+
+## arguments
+
+- Role: atomic
+
+Implement new, ls, attach and up syntax; reject unsafe names and clearly report missing dtach.
+
+## liveness
+
+- Role: atomic
+
+Distinguish live, stale and unreachable sockets; cleanup and concurrent creation must not disrupt live sessions.
+
+## sessions
+
+- Role: atomic
+
+Create, list, attach and attach-or-create with dtach; preserve arguments and apply cwd and command only on creation.
+
+## reconnect
+
+- Role: atomic
+
+Disconnect a terminal and reconnect to the same running application.
+
+## stale
+
+- Role: atomic
+
+Check ls excludes stale sockets, stale names can be reused, live sessions are preserved, and creation races are safe.
+
+## cwd
+
+- Role: atomic
+
+Verify argument boundaries, requested cwd, default shell and meaningful errors.
+
+## up
+
+- Role: atomic
+
+Run up twice, verify the same process is attached and replacement cwd and command do not affect it.
+
+## exit
+
+- Role: atomic
+
+Exit the application, verify its session disappears and reuse its name.
+
+## integration
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Dependency: cli
+- Children: path & terminal & omp & launcher_test & docs
+
+Retain selection, session names and OMP command while switching the real launcher paths to rmux. Depends on the verified CLI; i3 PATH and interactive redraw are the main risks.
+
+## path
+
+- Role: atomic
+
+Determine and implement a portable synced installation or explicit executable path that works from the actual i3 launcher environment.
+
+## terminal
+
+- Role: atomic
+
+Preserve repository and worktree selection and existing session naming; use rmux up in the selected directory.
+
+## omp
+
+- Role: atomic
+
+Preserve selection, session naming and the custom resume extension; use rmux up in the selected directory.
+
+## launcher_test
+
+- Role: atomic
+
+Exercise the actual terminal and OMP entry points, including terminal close and OMP redraw.
+
+## docs
+
+- Role: atomic
+
+The CLI usage message is the intended user-facing documentation; no separate usage document is required.
+
+## kill_feature
+
+- Role: material
+- Scope: local
+- Difficulty: 4 kyu
+- Children: kill_change
+
+Provide and verify named session termination as one material. Identifying the correct dtach session without affecting others is the main difficulty; no prerequisite feature work.
+
+## kill_change
+
+- Role: composite
+- Scope: local
+- Difficulty: 4 kyu
+- Children: kill_session
+
+One coherent CLI change including process identification, termination, help, and focused tests. The safe termination mechanism must be established before implementation.
+
+## kill_session
+
+- Role: molecule
+- Scope: local
+- Difficulty: 4 kyu
+- Children: kill_method & kill_command & kill_usage & kill_live_test & kill_clients_test & kill_errors_test & kill_race_test
+
+Implement and test rmux kill NAME as a single reviewable outcome. Investigate dtach behavior first; session lifecycle races and isolation are the main risks.
+
+## kill_method
+
+- Role: atomic
+
+Track the dtach master identity when creating a session; pre-existing sessions without tracked identity must be ended manually. Investigate safe identity verification and application termination.
+
+## kill_command
+
+- Role: atomic
+
+Add rmux kill NAME for sessions created with tracked identity. Stop the running application and report missing, untracked or unreachable sessions without affecting other sessions.
+
+## kill_usage
+
+- Role: atomic
+
+Include kill NAME in the CLI usage message and help message.
+
+## kill_live_test
+
+- Role: atomic
+
+Verify a detached application stops, the session is no longer listed, and its name can be reused.
+
+## kill_clients_test
+
+- Role: atomic
+
+Verify attached clients disconnect and another live session remains unaffected.
+
+## kill_errors_test
+
+- Role: atomic
+
+Verify invalid names, missing sessions and stale or unreachable sockets cannot terminate unrelated processes.
+
+## kill_race_test
+
+- Role: atomic
+
+Exercise termination alongside session creation or attachment and verify it does not terminate a replacement or unrelated session.
+
+## session_picker
+
+- Role: material
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: picker_delivery
+
+Allow independent persistent terminal and OMP sessions for the selected repository or worktree. Preserve existing clean session names, repository and worktree selection, and the OMP resume command.
+
+## picker_delivery
+
+- Role: composite
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Children: picker_work
+
+One coherent change covering session selection in both dotfiles launchers and verification of both workflows. It depends on understanding the existing naming and creation behavior.
+
+## picker_work
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Children: picker_naming & picker_list & picker_filter & picker_empty & picker_choice & picker_new & picker_verify
+
+Update both launchers to list and filter live rmux sessions, create the first session directly, and otherwise offer attachment or creation of an additional uniquely suffixed session. Take care not to match another checkout merely because its name shares a prefix.
+
+## picker_naming
+
+- Role: atomic
+
+Inspect how both launchers construct session names and create or attach to sessions.
+
+## picker_list
+
+- Role: atomic
+
+Use rmux ls to obtain live session names for the launchers.
+
+## picker_filter
+
+- Role: atomic
+
+Select the sessions belonging to the chosen repository or worktree and launcher type, including the existing clean name and additional suffixed names.
+
+## picker_empty
+
+- Role: atomic
+
+When no matching sessions exist, create the session using the existing clean name and selected directory.
+
+## picker_choice
+
+- Role: atomic
+
+When matching sessions exist, show them in a picker alongside a new-session option; attach to the chosen existing session and honor cancellation.
+
+## picker_new
+
+- Role: atomic
+
+When new session is selected, create an independent session with a unique hash suffix, preserving the selected directory and launcher command.
+
+## picker_verify
+
+- Role: atomic
+
+Exercise both launchers for clean creation, filtering, attachment, additional session creation, cancellation, and preserved worktree and OMP command behavior.
 
 ## interactive_mux
 
@@ -607,11 +909,7 @@ Automated runtime checks pass, and the user confirmed Alt-V and Alt-B in st with
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls & verify_st_patch
 
 
-The user installed the Rust runtime as ~/.local/bin/rmux without changing st or the i3 scripts. They used Super+Ctrl+T to create a session and opened a second terminal attached to that session. They reported that creating, moving and resizing rmux windows, renaming buffers, and moving between buffers worked through this path. They also reported that closing the final rmux window does nothing, and closing the last buffer ends the session.
-
-The user reported closing both terminal windows and successfully reattaching the same session in a third window. Atuin initially timed out on a cursor-position query after reattachment; its fix was subsequently tested successfully by the user in a new session.
-
-Still verify any agreed shortcuts not covered by those reports and ordinary input. Automated lifecycle and PTY tests also cover detachment and reattachment.
+The user verified the real Super+Ctrl+T i3 launcher and two attachments to one session. They tested window splits, focus, movement, resizing, buffer navigation, reordering and renaming, Alt+= equalization, final-window protection, final-buffer session termination, and reattachment after closing both terminal windows. Ctrl-Shift-H/L, Alt-H/J/K/L, Alt-Shift-H/J/K/L, and Alt-Ctrl-H/J/K/L were confirmed individually. Automated PTY and lifecycle tests cover ordinary input and shared sessions.
 
 ## verify_application_input
 
@@ -663,9 +961,7 @@ Document all supported keyboard controls and application conflicts, including Ct
 - Uncertainty: high
 - Dependency: input_controls & st_integration
 
-The user confirmed Alt-V, Alt-B and other tested shortcuts work in the no-rmux-patch st build with the updated runtime, and explicitly wants rmux to capture Ctrl-H and Ctrl-L. They subsequently tested the installed runtime through the real i3 launcher, attached a second terminal to the same session, and reported creating, moving and resizing windows, renaming buffers, and navigating buffers worked without changing st.
-
-The user confirmed that after launching st from another terminal and running rmux, the previous SGR 59 error no longer appeared. Renderer tests also confirm redraws do not emit SGR 59, and a nested Xephyr test reported no st stderr while displaying application output containing SGR 59. Other key combinations and buffer-line appearance still require physical verification.
+The user verified the installed runtime works with their unchanged st and no rmux-specific keybinding patch. Alt-V/B, Ctrl-Shift-H/L, Alt-H/J/K/L, Alt-Shift-H/J/K/L, and Alt-Ctrl-H/J/K/L work; the user also confirmed the SGR 59 warning is gone and the pane colors are correct.
 
 ## buffer_rename
 
@@ -741,7 +1037,7 @@ Decode CSI-u Alt+= (ESC[61;3u) as the equalize command, leave unmatched input un
 - Difficulty: 5 kyu
 - Dependency: equalize_windows
 
-Automated geometry and two-client integration tests confirm that ordinary Alt+= input balances pane areas and broadcasts the shared layout while preserving axes, IDs, and focus. The user physically tested Alt+= using Alt+Shift+0 and reported that rmux windows became equal in size. The user did not report testing the same action across two attached terminal windows, so the two-client physical check remains open.
+Automated geometry and two-client integration tests confirm ordinary Alt+= balances pane areas and broadcasts the shared layout while preserving axes, IDs, and focus. The user tested Alt+= using Alt+Shift+0 with two terminal windows attached to the same session and reported that the two rmux windows were equalized correctly.
 
 ## verify_atuin
 
@@ -757,304 +1053,3 @@ Atuin interactive history search previously timed out because the rmux buffer te
 
 The user reported that the first uncolored text appeared gray after the buffer line. Fixed a renderer ordering bug that reset the first pane cell after setting its colors. A color-enabled regression test verifies the first colored cell and subsequent default-colored cell. The user opened a fresh session through Super+Ctrl+T, cleared the screen, and confirmed the color was correct.
 
-# DONEs
-
-- [x] DONE: Deliver persistent rmux sessions [rmux](#rmux)
-  - [x] DONE: Implement and integrate rmux [delivery](#delivery)
-    - [x] DONE: Build and verify the Bash CLI [cli](#cli)
-      - [x] DONE: Choose private runtime socket storage [runtime](#runtime)
-      - [x] DONE: Parse and validate CLI arguments [arguments](#arguments)
-      - [x] DONE: Implement safe socket liveness handling [liveness](#liveness)
-      - [x] DONE: Implement session commands [sessions](#sessions)
-      - [x] DONE: Test disconnect and reconnect [reconnect](#reconnect)
-      - [x] DONE: Test live and stale sockets [stale](#stale)
-      - [x] DONE: Test command and working directory [cwd](#cwd)
-      - [x] DONE: Test attach-or-create behavior [up](#up)
-      - [x] DONE: Test session exit and reuse [exit](#exit)
-    - [x] DONE: Integrate and verify dotfiles launchers [integration](#integration)
-      - [x] DONE: Make rmux available to launchers [path](#path)
-      - [x] DONE: Switch the terminal launcher [terminal](#terminal)
-      - [x] DONE: Switch the OMP launcher [omp](#omp)
-      - [x] DONE: Test the real launcher paths [launcher_test](#launcher_test)
-      - [x] DONE: Document rmux usage [docs](#docs)
-
-- [x] DONE: Deliver named session termination [kill_feature](#kill_feature)
-  - [x] DONE: Implement session termination [kill_change](#kill_change)
-    - [x] DONE: Build and verify the kill command [kill_session](#kill_session)
-      - [x] DONE: Determine safe termination mechanism [kill_method](#kill_method)
-      - [x] DONE: Implement the kill command [kill_command](#kill_command)
-      - [x] DONE: Update command usage [kill_usage](#kill_usage)
-      - [x] DONE: Test terminating a live session [kill_live_test](#kill_live_test)
-      - [x] DONE: Test attached clients and isolation [kill_clients_test](#kill_clients_test)
-      - [x] DONE: Test termination error cases [kill_errors_test](#kill_errors_test)
-      - [x] DONE: Test session lifecycle races [kill_race_test](#kill_race_test)
-
-- [x] DONE: Select or create sessions in both launchers [session_picker](#session_picker)
-  - [x] DONE: Deliver session selection for both launchers [picker_delivery](#picker_delivery)
-    - [x] DONE: Implement and verify session selection [picker_work](#picker_work)
-      - [x] DONE: Identify current session naming and creation [picker_naming](#picker_naming)
-      - [x] DONE: List existing rmux sessions [picker_list](#picker_list)
-      - [x] DONE: Filter sessions for the selected checkout [picker_filter](#picker_filter)
-      - [x] DONE: Create a clean session when none exists [picker_empty](#picker_empty)
-      - [x] DONE: Offer existing sessions and new session [picker_choice](#picker_choice)
-      - [x] DONE: Create an additional suffixed session [picker_new](#picker_new)
-      - [x] DONE: Verify both launcher workflows [picker_verify](#picker_verify)
-
-## rmux
-
-- Role: material
-- Scope: coordinated
-- Difficulty: 3 kyu
-- Children: delivery
-
-Implement and integrate the full specification as one material. Difficulty lies in safe lifecycle management and real interactive launcher verification; there are no prerequisites.
-
-## delivery
-
-- Role: composite
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: cli & integration
-
-One coherent change spanning the CLI, session tests, and dotfiles integration. CLI behavior must be verified before launcher integration.
-
-## cli
-
-- Role: molecule
-- Scope: local
-- Difficulty: 4 kyu
-- Children: runtime & arguments & liveness & sessions & reconnect & stale & cwd & up & exit
-
-Provide the specified dtach session lifecycle and verify it with real terminal clients. Liveness and creation races are the main risks; no prerequisites.
-
-## runtime
-
-- Role: atomic
-
-Create user-specific runtime storage with safe permissions; sessions must not survive reboot.
-
-## arguments
-
-- Role: atomic
-
-Implement new, ls, attach and up syntax; reject unsafe names and clearly report missing dtach.
-
-## liveness
-
-- Role: atomic
-
-Distinguish live, stale and unreachable sockets; cleanup and concurrent creation must not disrupt live sessions.
-
-## sessions
-
-- Role: atomic
-
-Create, list, attach and attach-or-create with dtach; preserve arguments and apply cwd and command only on creation.
-
-## reconnect
-
-- Role: atomic
-
-Disconnect a terminal and reconnect to the same running application.
-
-## stale
-
-- Role: atomic
-
-Check ls excludes stale sockets, stale names can be reused, live sessions are preserved, and creation races are safe.
-
-## cwd
-
-- Role: atomic
-
-Verify argument boundaries, requested cwd, default shell and meaningful errors.
-
-## up
-
-- Role: atomic
-
-Run up twice, verify the same process is attached and replacement cwd and command do not affect it.
-
-## exit
-
-- Role: atomic
-
-Exit the application, verify its session disappears and reuse its name.
-
-## integration
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 5 kyu
-- Dependency: cli
-- Children: path & terminal & omp & launcher_test & docs
-
-Retain selection, session names and OMP command while switching the real launcher paths to rmux. Depends on the verified CLI; i3 PATH and interactive redraw are the main risks.
-
-## path
-
-- Role: atomic
-
-Determine and implement a portable synced installation or explicit executable path that works from the actual i3 launcher environment.
-
-## terminal
-
-- Role: atomic
-
-Preserve repository and worktree selection and existing session naming; use rmux up in the selected directory.
-
-## omp
-
-- Role: atomic
-
-Preserve selection, session naming and the custom resume extension; use rmux up in the selected directory.
-
-## launcher_test
-
-- Role: atomic
-
-Exercise the actual terminal and OMP entry points, including terminal close and OMP redraw.
-
-## docs
-
-- Role: atomic
-
-The CLI usage message is the intended user-facing documentation; no separate usage document is required.
-
-## kill_feature
-
-- Role: material
-- Scope: local
-- Difficulty: 4 kyu
-- Children: kill_change
-
-Provide and verify named session termination as one material. Identifying the correct dtach session without affecting others is the main difficulty; no prerequisite feature work.
-
-## kill_change
-
-- Role: composite
-- Scope: local
-- Difficulty: 4 kyu
-- Children: kill_session
-
-One coherent CLI change including process identification, termination, help, and focused tests. The safe termination mechanism must be established before implementation.
-
-## kill_session
-
-- Role: molecule
-- Scope: local
-- Difficulty: 4 kyu
-- Children: kill_method & kill_command & kill_usage & kill_live_test & kill_clients_test & kill_errors_test & kill_race_test
-
-Implement and test rmux kill NAME as a single reviewable outcome. Investigate dtach behavior first; session lifecycle races and isolation are the main risks.
-
-## kill_method
-
-- Role: atomic
-
-Track the dtach master identity when creating a session; pre-existing sessions without tracked identity must be ended manually. Investigate safe identity verification and application termination.
-
-## kill_command
-
-- Role: atomic
-
-Add rmux kill NAME for sessions created with tracked identity. Stop the running application and report missing, untracked or unreachable sessions without affecting other sessions.
-
-## kill_usage
-
-- Role: atomic
-
-Include kill NAME in the CLI usage message and help message.
-
-## kill_live_test
-
-- Role: atomic
-
-Verify a detached application stops, the session is no longer listed, and its name can be reused.
-
-## kill_clients_test
-
-- Role: atomic
-
-Verify attached clients disconnect and another live session remains unaffected.
-
-## kill_errors_test
-
-- Role: atomic
-
-Verify invalid names, missing sessions and stale or unreachable sockets cannot terminate unrelated processes.
-
-## kill_race_test
-
-- Role: atomic
-
-Exercise termination alongside session creation or attachment and verify it does not terminate a replacement or unrelated session.
-
-## session_picker
-
-- Role: material
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: picker_delivery
-
-Allow independent persistent terminal and OMP sessions for the selected repository or worktree. Preserve existing clean session names, repository and worktree selection, and the OMP resume command.
-
-## picker_delivery
-
-- Role: composite
-- Scope: coordinated
-- Difficulty: 5 kyu
-- Children: picker_work
-
-One coherent change covering session selection in both dotfiles launchers and verification of both workflows. It depends on understanding the existing naming and creation behavior.
-
-## picker_work
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 5 kyu
-- Children: picker_naming & picker_list & picker_filter & picker_empty & picker_choice & picker_new & picker_verify
-
-Update both launchers to list and filter live rmux sessions, create the first session directly, and otherwise offer attachment or creation of an additional uniquely suffixed session. Take care not to match another checkout merely because its name shares a prefix.
-
-## picker_naming
-
-- Role: atomic
-
-Inspect how both launchers construct session names and create or attach to sessions.
-
-## picker_list
-
-- Role: atomic
-
-Use rmux ls to obtain live session names for the launchers.
-
-## picker_filter
-
-- Role: atomic
-
-Select the sessions belonging to the chosen repository or worktree and launcher type, including the existing clean name and additional suffixed names.
-
-## picker_empty
-
-- Role: atomic
-
-When no matching sessions exist, create the session using the existing clean name and selected directory.
-
-## picker_choice
-
-- Role: atomic
-
-When matching sessions exist, show them in a picker alongside a new-session option; attach to the chosen existing session and honor cancellation.
-
-## picker_new
-
-- Role: atomic
-
-When new session is selected, create an independent session with a unique hash suffix, preserving the selected directory and launcher command.
-
-## picker_verify
-
-- Role: atomic
-
-Exercise both launchers for clean creation, filtering, attachment, additional session creation, cancellation, and preserved worktree and OMP command behavior.
