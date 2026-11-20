@@ -59,9 +59,36 @@ struct Client {
 struct Buffer {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
-    parser: vt100::Parser,
+    parser: vt100::Parser<TerminalReplies>,
     child: Box<dyn portable_pty::Child>,
     session_id: Option<libc::pid_t>,
+}
+
+#[derive(Default)]
+struct TerminalReplies {
+    pending: Vec<u8>,
+}
+
+impl vt100::Callbacks for TerminalReplies {
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        i1: Option<u8>,
+        i2: Option<u8>,
+        params: &[&[u16]],
+        command: char,
+    ) {
+        if i1.is_none() && i2.is_none() && command == 'n' && params == [&[6][..]] {
+            let (row, col) = screen.cursor_position();
+            write!(
+                &mut self.pending,
+                "\x1b[{};{}R",
+                u32::from(row) + 1,
+                u32::from(col) + 1
+            )
+            .expect("writing to a Vec cannot fail");
+        }
+    }
 }
 
 struct SessionState {
@@ -231,10 +258,11 @@ fn spawn_buffer(
     let session_id = child.process_id().map(|pid| pid as libc::pid_t);
     let writer = master.take_writer().map_err(io::Error::other)?;
     let reader = master.try_clone_reader().map_err(io::Error::other)?;
-    let parser = vt100::Parser::new(
+    let parser = vt100::Parser::new_with_callbacks(
         NonZeroU16::new(size.rows).unwrap_or(NonZeroU16::MIN),
         NonZeroU16::new(size.cols).unwrap_or(NonZeroU16::MIN),
         1000,
+        TerminalReplies::default(),
     );
     Ok((
         Buffer {
@@ -257,6 +285,10 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session: Arc<Session>, 
                     let mut state = lock_state(&session);
                     if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
                         buffer.parser.process(&output[..length]);
+                        let replies = std::mem::take(&mut buffer.parser.callbacks_mut().pending);
+                        if !replies.is_empty() && buffer.writer.write_all(&replies).is_err() {
+                            break;
+                        }
                         if state.layout.is_buffer_visible(buffer_id) {
                             let mut payload = Vec::with_capacity(8 + length);
                             payload.extend_from_slice(&buffer_id.to_be_bytes());

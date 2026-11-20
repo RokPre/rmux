@@ -189,6 +189,44 @@ class Sessions(unittest.TestCase):
         os.write(fd3, b'exit\n')
         self.wait_for(lambda: self.run_rmux('ls').stdout == '')
 
+    def test_cursor_position_query_receives_buffer_coordinates(self):
+        marker = Path(self.tmp.name, 'cursor-replies')
+        script = (
+            'import os,select,time,tty; '
+            'tty.setraw(0); '
+            'os.write(1,b"\\x1b[4;7H\\x1b["); '
+            'time.sleep(0.1); '
+            'os.write(1,b"6n"); '
+            'r,_,_=select.select([0],[],[],2); '
+            'response=os.read(0,128) if r else b"TIMEOUT"; '
+            f'open({str(marker)!r},"wb").write(response)'
+        )
+        self.start('new', 'cursor-query', '--', 'python3', '-c', script)
+        self.wait_for(marker.exists)
+        self.assertEqual(marker.read_bytes(), b'\x1b[4;7R')
+
+    def test_cursor_query_works_without_attached_clients(self):
+        ready = Path(self.tmp.name, 'cursor-ready')
+        trigger = Path(self.tmp.name, 'cursor-trigger')
+        result = Path(self.tmp.name, 'cursor-detached')
+        script = (
+            'import os,select,time,tty; '
+            'tty.setraw(0); '
+            f'open({str(ready)!r},"w").close(); '
+            f'exec("while not os.path.exists({str(trigger)!r}):\\n time.sleep(0.01)"); '
+            'os.write(1,b"\\x1b[3;5H\\x1b[6n"); '
+            'r,_,_=select.select([0],[],[],2); '
+            'response=os.read(0,128) if r else b"TIMEOUT"; '
+            f'open({str(result)!r},"wb").write(response)'
+        )
+        client, _ = self.start('new', 'cursor-detached', '--', 'python3', '-c', script)
+        self.wait_for(ready.exists)
+        client.terminate()
+        client.wait(timeout=5)
+        trigger.touch()
+        self.wait_for(result.exists)
+        self.assertEqual(result.read_bytes(), b'\x1b[3;5R')
+
     def test_client_ctrl_t_and_ctrl_w_control_buffers(self):
         process, fd = self.start('new', 'keybindings', '--', 'sh', '-i')
         self.wait_for(lambda: self.run_rmux('ls').stdout == 'keybindings\n')

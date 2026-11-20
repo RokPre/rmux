@@ -86,6 +86,7 @@
       - [ ] TODO: Check whether rmux needs the custom st key patch [verify_st_patch](#verify_st_patch)
       - [x] TODO: Verify buffer rename behavior [verify_buffer_rename](#verify_buffer_rename)
       - [ ] TODO: Verify rmux window equalization [verify_equalize](#verify_equalize)
+      - [x] TODO: Verify Atuin cursor-position queries [verify_atuin](#verify_atuin)
     - [ ] TODO: Update user-facing usage [usage_docs](#usage_docs)
       - [ ] TODO: Document session, buffer and rmux window terminology [document_terms](#document_terms)
       - [ ] TODO: Document the supported keyboard controls and conflicts [document_controls](#document_controls)
@@ -510,7 +511,7 @@ Group end-to-end acceptance and usage documentation into one coherent delivery c
 - Role: molecule
 - Scope: coordinated
 - Difficulty: 2 kyu
-- Children: verify_cli & verify_launchers & verify_detach & verify_hidden & verify_splits & verify_independent_switch & verify_window_close & verify_buffer_close & verify_buffer_line & verify_window_controls & verify_shared_clients & verify_shared_size & verify_centering & verify_resize_events & verify_keys & verify_application_input & verify_st_patch & verify_buffer_rename & verify_equalize
+- Children: verify_cli & verify_launchers & verify_detach & verify_hidden & verify_splits & verify_independent_switch & verify_window_close & verify_buffer_close & verify_buffer_line & verify_window_controls & verify_shared_clients & verify_shared_size & verify_centering & verify_resize_events & verify_keys & verify_application_input & verify_st_patch & verify_buffer_rename & verify_equalize & verify_atuin
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
 Automated runtime checks pass, and the user confirmed Alt-V and Alt-B in st without the rmux-specific patch. Complete real desktop verification of all key combinations, SGR 59 warning behavior, buffer-line background, equalization and the i3 launcher path. The former rmux-specific st keybinding patch is incompatible with the current ordinary-key decoder.
@@ -605,7 +606,9 @@ Automated runtime checks pass, and the user confirmed Alt-V and Alt-B in st with
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls & verify_st_patch
 
 
-After verifying the updated runtime in no-patch st, test the selected runtime and st builds through the real i3 launcher. Temporary test builds do not change installed binaries. Use Super+Ctrl+T to create and attach twice to a fresh session; verify shortcut delivery, shared layout and ordinary input, Alt-W with the final window, and Ctrl-W with the final buffer. Close both terminal windows with Super+q, reattach, and confirm buffers remain. Automated lifecycle and PTY tests pass but do not replace this physical check.
+The user installed the Rust runtime as ~/.local/bin/rmux without changing st or the i3 scripts. They used Super+Ctrl+T to create a session and opened a second terminal attached to that session. They reported that creating, moving and resizing rmux windows, renaming buffers, and moving between buffers worked through this path. They also reported that closing the final rmux window does nothing, and closing the last buffer ends the session.
+
+Still verify any agreed shortcuts not covered by those reports and ordinary input. Close both attached terminal windows with Super+q, reattach, and confirm buffers remain. Automated lifecycle and PTY tests pass but do not replace this physical check.
 
 ## verify_application_input
 
@@ -657,7 +660,9 @@ Document all supported keyboard controls and application conflicts, including Ct
 - Uncertainty: high
 - Dependency: input_controls & st_integration
 
-The user confirmed Alt-V, Alt-B and other tested shortcuts work in the no-rmux-patch st build with the updated runtime, and explicitly wants rmux to capture Ctrl-H and Ctrl-L. Renderer tests now confirm redraws do not emit SGR 59; a nested Xephyr test with unpatched st reported no st stderr while displaying application output containing SGR 59. In the nested test two attached st clients forwarded ordinary input to the same session; Ctrl-T, Alt-V/B and Alt+= were not forwarded as ordinary input, but the test did not inspect the resulting layout and therefore did not establish each action. Verify remaining key combinations, actual warning behavior, and buffer-line appearance in the real desktop.
+The user confirmed Alt-V, Alt-B and other tested shortcuts work in the no-rmux-patch st build with the updated runtime, and explicitly wants rmux to capture Ctrl-H and Ctrl-L. They subsequently tested the installed runtime through the real i3 launcher, attached a second terminal to the same session, and reported creating, moving and resizing windows, renaming buffers, and navigating buffers worked without changing st.
+
+The user confirmed that after launching st from another terminal and running rmux, the previous SGR 59 error no longer appeared. Renderer tests also confirm redraws do not emit SGR 59, and a nested Xephyr test reported no st stderr while displaying application output containing SGR 59. Other key combinations and buffer-line appearance still require physical verification.
 
 ## buffer_rename
 
@@ -734,6 +739,13 @@ Decode CSI-u Alt+= (ESC[61;3u) as the equalize command, leave unmatched input un
 - Dependency: equalize_windows
 
 Automated geometry and two-client integration tests confirm that ordinary Alt+= input balances pane areas and broadcasts the shared layout while preserving axes, IDs, and focus. The user physically tested Alt+= using Alt+Shift+0 and reported that rmux windows became equal in size. The user did not report testing the same action across two attached terminal windows, so the two-client physical check remains open.
+
+## verify_atuin
+
+- Role: atomic
+- Scope: coordinated
+
+Atuin interactive history search previously timed out because the rmux buffer terminal did not answer CSI 6 n. The runtime now responds from its per-buffer terminal parser. Automated tests cover fragmented requests and cursor replies with and without attached clients. The user tested the installed fix in a new session and reported that Atuin appears to work.
 
 # DONEs
 
