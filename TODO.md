@@ -609,7 +609,9 @@ Automated runtime checks pass, and the user confirmed Alt-V and Alt-B in st with
 
 The user installed the Rust runtime as ~/.local/bin/rmux without changing st or the i3 scripts. They used Super+Ctrl+T to create a session and opened a second terminal attached to that session. They reported that creating, moving and resizing rmux windows, renaming buffers, and moving between buffers worked through this path. They also reported that closing the final rmux window does nothing, and closing the last buffer ends the session.
 
-Still verify any agreed shortcuts not covered by those reports and ordinary input. Close both attached terminal windows with Super+q, reattach, and confirm buffers remain. Automated lifecycle and PTY tests pass but do not replace this physical check.
+The user reported closing both terminal windows and successfully reattaching the same session in a third window. Atuin initially timed out on a cursor-position query after reattachment; its fix was subsequently tested successfully by the user in a new session.
+
+Still verify any agreed shortcuts not covered by those reports and ordinary input. Automated lifecycle and PTY tests also cover detachment and reattachment.
 
 ## verify_application_input
 
