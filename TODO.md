@@ -25,7 +25,7 @@
       - [x] TODO: Terminate the selected buffer and its program [buffer_close](#buffer_close)
       - [x] TODO: Remove a buffer when its program exits [buffer_exit](#buffer_exit)
       - [x] TODO: End the session when its last buffer closes [final_buffer](#final_buffer)
-  - [ ] TODO: Deliver shared interactive views [interface_stage](#interface_stage)
+  - [x] TODO: Deliver shared interactive views [interface_stage](#interface_stage)
     - [x] TODO: Implement shared rmux windows [window_layout](#window_layout)
       - [x] TODO: Display the initial buffer in one rmux window [initial_window](#initial_window)
       - [x] TODO: Split a window vertically showing its existing buffer [vertical_split](#vertical_split)
@@ -59,6 +59,12 @@
       - [x] TODO: Bind Alt-Shift directional keys to window movement [window_move_keys](#window_move_keys)
       - [x] TODO: Bind Alt-Ctrl directional keys to window resizing [window_size_keys](#window_size_keys)
       - [x] TODO: Update st key handling if the chosen bindings require it [st_integration](#st_integration)
+    - [x] TODO: Add user-visible names for terminal buffers [buffer_rename](#buffer_rename)
+      - [x] TODO: Track display names alongside buffer IDs [buffer_name_state](#buffer_name_state)
+      - [x] TODO: Rename the active buffer with Ctrl-R [rename_buffer_key](#rename_buffer_key)
+    - [x] TODO: Equalize the sizes of rmux windows [equalize_windows](#equalize_windows)
+      - [x] TODO: Rebalance split ratios across visible windows [equalize_layout](#equalize_layout)
+      - [x] TODO: Bind window equalization to Alt+= [equalize_key](#equalize_key)
   - [ ] TODO: Verify and document the delivered interface [acceptance_stage](#acceptance_stage)
     - [ ] TODO: Verify the complete interactive contract [verification](#verification)
       - [x] TODO: Verify the existing CLI creation, attachment, listing and kill behavior [verify_cli](#verify_cli)
@@ -77,6 +83,9 @@
       - [x] TODO: Verify application dimensions update after resize, view changes and detach [verify_resize_events](#verify_resize_events)
       - [ ] TODO: Verify the agreed key combinations through the actual st and i3 path [verify_keys](#verify_keys)
       - [x] TODO: Verify non-rmux input reaches interactive terminal applications [verify_application_input](#verify_application_input)
+      - [ ] TODO: Check whether rmux needs the custom st key patch [verify_st_patch](#verify_st_patch)
+      - [x] TODO: Verify buffer rename behavior [verify_buffer_rename](#verify_buffer_rename)
+      - [ ] TODO: Verify rmux window equalization [verify_equalize](#verify_equalize)
     - [ ] TODO: Update user-facing usage [usage_docs](#usage_docs)
       - [ ] TODO: Document session, buffer and rmux window terminology [document_terms](#document_terms)
       - [ ] TODO: Document the supported keyboard controls and conflicts [document_controls](#document_controls)
@@ -269,10 +278,10 @@ Manage running terminal programs independently of their display windows. Scope i
 - Role: composite
 - Scope: coordinated
 - Difficulty: 2 kyu
-- Children: window_layout & presentation & input_controls
+- Children: window_layout & presentation & input_controls & buffer_rename & equalize_windows
 - Dependency: runtime_stage
 
-Group window layout, rendering and keyboard controls into one coherent interactive interface commit. Scope crosses layout, client rendering and input; difficulty is high because shared focus and terminal sizing interact. Depends on the runtime.
+Group shared window layout, rendering, and keyboard controls into one interactive interface. This spans layout state, attached-client rendering, and input; the existing window behavior is complete, with buffer naming and window equalization added as cross-cutting interface features. Depends on the runtime.
 
 ## window_layout
 
@@ -501,10 +510,10 @@ Group end-to-end acceptance and usage documentation into one coherent delivery c
 - Role: molecule
 - Scope: coordinated
 - Difficulty: 2 kyu
-- Children: verify_cli & verify_launchers & verify_detach & verify_hidden & verify_splits & verify_independent_switch & verify_window_close & verify_buffer_close & verify_buffer_line & verify_window_controls & verify_shared_clients & verify_shared_size & verify_centering & verify_resize_events & verify_keys & verify_application_input
+- Children: verify_cli & verify_launchers & verify_detach & verify_hidden & verify_splits & verify_independent_switch & verify_window_close & verify_buffer_close & verify_buffer_line & verify_window_controls & verify_shared_clients & verify_shared_size & verify_centering & verify_resize_events & verify_keys & verify_application_input & verify_st_patch & verify_buffer_rename & verify_equalize
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
-Exercise real terminal clients, running programs and launcher entry points, including edge cases and multiple attachments. Scope crosses runtime, rendering and integration; difficulty is reliably observing interactive terminal state and lifecycle. Depends on the implementation goals.
+Automated runtime checks pass, and the user confirmed Alt-V and Alt-B in st without the rmux-specific patch. Complete real desktop verification of all key combinations, SGR 59 warning behavior, buffer-line background, equalization and the i3 launcher path. The former rmux-specific st keybinding patch is incompatible with the current ordinary-key decoder.
 
 ## verify_cli
 
@@ -593,10 +602,10 @@ Exercise real terminal clients, running programs and launcher entry points, incl
 ## verify_keys
 
 - Role: atomic
-- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
+- Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls & verify_st_patch
 
 
-Use a freshly built rmux client and the st build with the rmux keybinding patch, then launch a fresh session through the i3 terminal launcher. Exercise every agreed shortcut, verify ordinary input reaches a running shell, confirm Alt-W cannot close the last rmux window, and confirm the final Ctrl-W closes the session. Decoder tests and patch compilation alone do not complete this live check.
+After verifying the updated runtime in no-patch st, test the selected runtime and st builds through the real i3 launcher. Temporary test builds do not change installed binaries. Use Super+Ctrl+T to create and attach twice to a fresh session; verify shortcut delivery, shared layout and ordinary input, Alt-W with the final window, and Ctrl-W with the final buffer. Close both terminal windows with Super+q, reattach, and confirm buffers remain. Automated lifecycle and PTY tests pass but do not replace this physical check.
 
 ## verify_application_input
 
@@ -623,8 +632,10 @@ Document the delivered session, buffer and rmux window model, controls, lifetime
 ## document_controls
 
 - Role: atomic
-- Dependency: verification
+- Dependency: verification & buffer_rename & equalize_windows
 
+
+Document all supported keyboard controls and application conflicts, including Ctrl-R buffer renaming and Alt+= window equalization after those features are implemented. State any verified physical-key fallback required by st.
 
 ## document_lifecycle
 
@@ -637,6 +648,92 @@ Document the delivered session, buffer and rmux window model, controls, lifetime
 - Role: atomic
 - Dependency: verification
 
+
+## verify_st_patch
+
+- Role: atomic
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Uncertainty: high
+- Dependency: input_controls & st_integration
+
+The user confirmed Alt-V, Alt-B and other tested shortcuts work in the no-rmux-patch st build with the updated runtime, and explicitly wants rmux to capture Ctrl-H and Ctrl-L. Renderer tests now confirm redraws do not emit SGR 59; a nested Xephyr test with unpatched st reported no st stderr while displaying application output containing SGR 59. In the nested test two attached st clients forwarded ordinary input to the same session; Ctrl-T, Alt-V/B and Alt+= were not forwarded as ordinary input, but the test did not inspect the resulting layout and therefore did not establish each action. Verify remaining key combinations, actual warning behavior, and buffer-line appearance in the real desktop.
+
+## buffer_rename
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Uncertainty: high
+- Dependency: buffer_runtime & presentation & input_controls
+- Children: buffer_name_state & rename_buffer_key
+
+Keep stable numeric IDs separate from user-visible labels. Initialize each name from its numeric ID, share names through layout snapshots, and show the names in the buffer line across attachments and windows. Ctrl-R opens a prefilled rename prompt for the focused buffer; Enter commits, Escape cancels, and Ctrl-U clears the name so Enter restores the numeric label.
+
+## buffer_name_state
+
+- Role: atomic
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Dependency: buffer_runtime & presentation
+
+Store a user-visible name alongside each stable buffer ID, initialize it from the current numeric label, include it in shared layout state, and render the same name in every attached client.
+
+## rename_buffer_key
+
+- Role: atomic
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Dependency: buffer_name_state & input_controls
+
+Ctrl-R opens a local prompt for the focused buffer, prefilled with its current display name. Enter commits the UTF-8 name and broadcasts it to all attached clients; Escape cancels without changing the old name. Ctrl-U clears the field, so committing an empty name restores the numeric buffer ID. Prompt input must never reach the buffer's terminal program.
+
+## verify_buffer_rename
+
+- Role: atomic
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Dependency: buffer_rename
+
+Verify through automated tests that Ctrl-R enters the local prompt, Enter commits a UTF-8 label, Escape cancels, and prompt text never reaches the terminal program. Check that the shared label is visible to a second attachment, remains associated with the same buffer ID and order, persists when switching away and back, and is used when multiple rmux windows show that buffer. Confirm clearing with Ctrl-U restores the numeric label.
+
+## equalize_windows
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Uncertainty: high
+- Dependency: window_layout & input_controls
+- Children: equalize_layout & equalize_key
+
+Provide a shared layout command that makes visible rmux windows approximately equal in terminal-cell area while preserving the split tree, buffers, and focus. This molecule covers the ratio algorithm, Alt+= CSI-u command path, and st key mapping. Physical key delivery remains tracked by verify_equalize and verify_st_patch.
+
+## equalize_layout
+
+- Role: atomic
+- Scope: local
+- Difficulty: 5 kyu
+- Dependency: window_layout
+
+Rebalance ratios recursively from the number of window leaves in each child subtree. Rounded percentage ratios approximate equal pane area; geometry deterministically assigns integer remainder cells. Changing ratios alone preserves the split tree, window and buffer IDs, and focus.
+
+## equalize_key
+
+- Role: atomic
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Dependency: equalize_layout & input_controls & st_integration
+
+Decode CSI-u Alt+= (ESC[61;3u) as the equalize command, leave unmatched input unchanged, dispatch it through the shared session layout, and add the matching XK_equal/Mod1Mask mapping to st-rmux-keybindings.diff.
+
+## verify_equalize
+
+- Role: atomic
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Dependency: equalize_windows
+
+Automated geometry and two-client integration tests confirm that ordinary Alt+= input balances pane areas and broadcasts the shared layout while preserving axes, IDs, and focus. The user physically tested Alt+= using Alt+Shift+0 and reported that rmux windows became equal in size. The user did not report testing the same action across two attached terminal windows, so the two-client physical check remains open.
 
 # DONEs
 

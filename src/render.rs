@@ -4,8 +4,9 @@ use std::io::{self, Write};
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::queue;
 use crossterm::style::{
-    Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use vt100::{Color as VtColor, Parser};
 
 use crate::layout::{Divider, LayoutGeometry, LayoutSnapshot, PaneRect};
@@ -17,6 +18,7 @@ pub(crate) const BUFFER_OUTPUT: u8 = 5;
 pub(crate) struct Renderer {
     snapshot: Option<LayoutSnapshot>,
     parsers: HashMap<u64, Parser>,
+    prompt: Option<String>,
 }
 
 impl Renderer {
@@ -59,6 +61,27 @@ impl Renderer {
         self.snapshot = Some(snapshot);
     }
 
+    pub(crate) fn active_buffer(&self) -> Option<(u64, String)> {
+        let snapshot = self.snapshot.as_ref()?;
+        let buffer = snapshot.active_buffer?;
+        let name = snapshot
+            .buffer_names
+            .get(&buffer)
+            .cloned()
+            .unwrap_or_else(|| buffer.to_string());
+        Some((buffer, name))
+    }
+
+    pub(crate) fn has_buffer(&self, buffer: u64) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.buffers.contains(&buffer))
+    }
+
+    pub(crate) fn set_prompt(&mut self, prompt: Option<String>) {
+        self.prompt = prompt;
+    }
+
     pub(crate) fn draw(&self, output: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return Ok(());
@@ -66,13 +89,23 @@ impl Renderer {
         let geometry = snapshot.geometry(cols, rows);
         queue!(output, Hide)?;
         if rows >= 3 {
-            draw_buffer_line(output, snapshot, cols)?;
+            if let Some(prompt) = self.prompt.as_ref() {
+                draw_header_line(output, prompt, cols)?;
+            } else {
+                draw_buffer_line(output, snapshot, cols)?;
+            }
         }
         for placement in &geometry.windows {
             draw_pane(output, placement.rect, self.parsers.get(&placement.buffer))?;
         }
         draw_dividers(output, &geometry)?;
-        if let Some(placement) = geometry
+        if let Some(prompt) = self.prompt.as_ref() {
+            if rows >= 3 && cols > 0 {
+                let cursor_col = UnicodeWidthStr::width(prompt.as_str())
+                    .min(cols.saturating_sub(1) as usize) as u16;
+                queue!(output, MoveTo(cursor_col, 0), Show)?;
+            }
+        } else if let Some(placement) = geometry
             .windows
             .iter()
             .find(|window| window.id == snapshot.focused_window)
@@ -88,7 +121,7 @@ impl Renderer {
                 }
             }
         }
-        queue!(output, ResetColor, SetAttribute(Attribute::Reset))?;
+        queue!(output, SetAttribute(Attribute::Reset))?;
         output.flush()
     }
 }
@@ -98,13 +131,6 @@ fn draw_buffer_line(
     snapshot: &LayoutSnapshot,
     cols: u16,
 ) -> io::Result<()> {
-    queue!(
-        output,
-        MoveTo(0, 0),
-        SetBackgroundColor(Color::DarkGrey),
-        SetForegroundColor(Color::White),
-        SetAttribute(Attribute::Bold)
-    )?;
     let mut line = String::new();
     for (index, buffer) in snapshot.buffers.iter().enumerate() {
         if index > 0 {
@@ -113,18 +139,40 @@ fn draw_buffer_line(
         if Some(*buffer) == snapshot.active_buffer {
             line.push('[');
         }
-        line.push_str(&buffer.to_string());
+        if let Some(name) = snapshot.buffer_names.get(buffer) {
+            line.push_str(name);
+        } else {
+            line.push_str(&buffer.to_string());
+        }
         if Some(*buffer) == snapshot.active_buffer {
             line.push(']');
         }
     }
-    let visible: String = line.chars().take(cols as usize).collect();
-    let padding = (cols as usize).saturating_sub(line.len());
+    draw_header_line(output, &line, cols)
+}
+
+fn draw_header_line(output: &mut impl Write, line: &str, cols: u16) -> io::Result<()> {
+    queue!(
+        output,
+        MoveTo(0, 0),
+        SetBackgroundColor(Color::DarkGrey),
+        SetForegroundColor(Color::White),
+        SetAttribute(Attribute::Bold)
+    )?;
+    let mut visible = String::new();
+    let mut width = 0;
+    for character in line.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width + character_width > cols as usize {
+            break;
+        }
+        visible.push(character);
+        width += character_width;
+    }
     queue!(
         output,
         Print(visible),
-        Print(" ".repeat(padding)),
-        ResetColor,
+        Print(" ".repeat(cols as usize - width)),
         SetAttribute(Attribute::Reset)
     )
 }
@@ -169,7 +217,7 @@ fn draw_pane(output: &mut impl Write, rect: PaneRect, parser: Option<&Parser>) -
             )?;
         }
     }
-    queue!(output, ResetColor, SetAttribute(Attribute::Reset))
+    queue!(output, SetAttribute(Attribute::Reset))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -408,10 +456,12 @@ mod tests {
             focused_window: 1,
             active_buffer: Some(7),
             buffers: vec![7],
+            buffer_names: HashMap::from([(7, "7".into())]),
         });
 
         let mut output = Vec::new();
         renderer.draw(&mut output, 10, 6).unwrap();
+        assert!(!output.windows(5).any(|bytes| bytes == b"\x1b[59m"));
         let mut terminal = Parser::new(
             std::num::NonZeroU16::new(6).unwrap(),
             std::num::NonZeroU16::new(10).unwrap(),
@@ -427,6 +477,109 @@ mod tests {
     }
 
     #[test]
+    fn buffer_line_displays_shared_names_and_marks_the_active_buffer() {
+        let mut renderer = Renderer::default();
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 8 },
+            focused_window: 1,
+            active_buffer: Some(8),
+            buffers: vec![7, 8],
+            buffer_names: HashMap::from([(7, "shell".into()), (8, "雪".into())]),
+        });
+
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 20, 3).unwrap();
+        let mut terminal = Parser::new(
+            std::num::NonZeroU16::new(3).unwrap(),
+            std::num::NonZeroU16::new(20).unwrap(),
+            0,
+        );
+        terminal.process(&output);
+        let screen = terminal.screen();
+
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "s");
+        assert_eq!(screen.cell(0, 7).unwrap().contents(), "[");
+        assert_eq!(screen.cell(0, 8).unwrap().contents(), "雪");
+        assert!(screen.cell(0, 9).unwrap().is_wide_continuation());
+        assert_eq!(screen.cell(0, 10).unwrap().contents(), "]");
+    }
+
+    #[test]
+    fn rename_prompt_shows_edit_text_then_restores_buffer_line() {
+        let mut renderer = Renderer::default();
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 7 },
+            focused_window: 1,
+            active_buffer: Some(7),
+            buffers: vec![7],
+            buffer_names: HashMap::from([(7, "shell".into())]),
+        });
+        renderer.set_prompt(Some("Rename 7: shell".into()));
+
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 20, 3).unwrap();
+        let mut terminal = Parser::new(
+            std::num::NonZeroU16::new(3).unwrap(),
+            std::num::NonZeroU16::new(20).unwrap(),
+            0,
+        );
+        terminal.process(&output);
+        {
+            let screen = terminal.screen();
+            assert_eq!(screen.cell(0, 0).unwrap().contents(), "R");
+            assert_eq!(screen.cell(0, 10).unwrap().contents(), "s");
+            assert_eq!(screen.cursor_position(), (0, 15));
+        }
+
+        renderer.set_prompt(None);
+        output.clear();
+        renderer.draw(&mut output, 20, 3).unwrap();
+        terminal.process(&output);
+        assert_eq!(terminal.screen().cell(0, 0).unwrap().contents(), "[");
+    }
+
+    #[test]
+    fn buffer_line_background_does_not_bleed_into_the_pane() {
+        let mut renderer = Renderer::default();
+        let mut snapshot = Vec::from(1u64.to_be_bytes());
+        snapshot.extend_from_slice(&4u16.to_be_bytes());
+        snapshot.extend_from_slice(&10u16.to_be_bytes());
+        snapshot.extend_from_slice(b"prompt");
+        renderer.apply_frame(BUFFER_SNAPSHOT, &snapshot).unwrap();
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 1 },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1, 2, 3, 4, 5],
+            buffer_names: HashMap::from([
+                (1, "1".into()),
+                (2, "2".into()),
+                (3, "3".into()),
+                (4, "4".into()),
+                (5, "5".into()),
+            ]),
+        });
+
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 10, 5).unwrap();
+        let mut terminal = Parser::new(
+            std::num::NonZeroU16::new(5).unwrap(),
+            std::num::NonZeroU16::new(10).unwrap(),
+            0,
+        );
+        terminal.process(&output);
+        let screen = terminal.screen();
+
+        let header_background = screen.cell(0, 0).unwrap().bgcolor();
+        let pane_background = screen.cell(1, 0).unwrap().bgcolor();
+        if std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
+            assert_eq!(header_background, pane_background);
+        } else {
+            assert_ne!(header_background, pane_background);
+        }
+    }
+
+    #[test]
     fn full_screen_redraw_stays_compact() {
         let mut renderer = Renderer::default();
         let mut snapshot = Vec::from(1u64.to_be_bytes());
@@ -438,6 +591,7 @@ mod tests {
             focused_window: 1,
             active_buffer: Some(1),
             buffers: vec![1],
+            buffer_names: HashMap::from([(1, "1".into())]),
         });
 
         let mut output = Vec::new();

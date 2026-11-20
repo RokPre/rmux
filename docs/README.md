@@ -47,21 +47,23 @@ rmux kill NAME
 
 ## Keyboard controls
 
-The buffer line is drawn across the top of each attached terminal. Buffer IDs appear in order; the focused buffer is shown in brackets, for example `1  [2]  3`.
+The buffer line is drawn across the top of each attached terminal. Labels appear in buffer order; an unrenamed buffer uses its numeric ID, and the focused buffer is shown in brackets, for example `shell  [editor]  3`. Renamed labels are shared across attachments and rmux windows.
 
 | Keys | Action |
 | --- | --- |
 | `Ctrl-T` | Create an interactive-shell buffer and show it in the focused rmux window. |
 | `Ctrl-W` | Close the focused buffer. Every rmux window showing it switches to a remaining buffer. |
 | `Ctrl-H` / `Ctrl-L` | Show the previous / next buffer in the focused rmux window. |
+| `Ctrl-R` | Rename the focused buffer. Enter saves, Escape cancels, and Ctrl-U clears the name back to its numeric ID. |
 | `Ctrl-Shift-H` / `Ctrl-Shift-L` | Move the focused buffer left / right in the buffer line. |
 | `Alt-V` / `Alt-B` | Split the focused rmux window vertically (side by side) / horizontally (top and bottom). The new window shows the same buffer. |
 | `Alt-W` | Close the focused rmux window. The final rmux window cannot be closed. |
 | `Alt-H` / `Alt-J` / `Alt-K` / `Alt-L` | Focus the rmux window left / down / up / right. |
 | `Alt-Shift-H/J/K/L` | Move the focused rmux window left / down / up / right. |
 | `Alt-Ctrl-H/J/K/L` | Move the nearest matching split boundary left / down / up / right by 5 percentage points. |
+| `Alt+=` | Rebalance split ratios for approximately equal pane areas; terminal-cell rounding can leave small differences. |
 
-rmux captures these configured chords; other terminal input is passed to the running application. The controls use CSI-u key sequences. The included `st-rmux-keybindings.diff` patch maps the chords in `st`; apply it after `st-fix-keyboard-input-0.8.5.diff` as shown in the dotfiles `st-patches/README.md`. Other terminals need to emit the same sequences. In the current i3 configuration, window-manager bindings use `Mod4` (Super), so they do not consume these unprefixed rmux Alt bindings.
+Rmux consumes its shortcuts before forwarding other input to the application. The ordinary terminal encodings of Ctrl-T, Ctrl-W, Ctrl-H, Ctrl-L, and Ctrl-R are reserved for rmux, so their usual application functions are unavailable. In particular, Ctrl-H is often identical to Backspace, and Ctrl-L normally clears a terminal. Alt shortcuts use Escape-prefixed characters; Escape followed quickly by a bound character is indistinguishable from Alt. Ctrl-Shift-H/L use the sequences provided by the existing st keyboard-input patch. Build st without the rmux-specific `st-rmux-keybindings.diff`: that patch changes key encodings and is incompatible with the ordinary encodings rmux now expects.
 
 ## Lifetimes
 

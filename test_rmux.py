@@ -29,6 +29,7 @@ MOVE_WINDOW = 12
 RESIZE_WINDOW = 13
 REORDER_BUFFER_LEFT = 14
 REORDER_BUFFER_RIGHT = 15
+RENAME_BUFFER = 16
 
 
 class Sessions(unittest.TestCase):
@@ -196,20 +197,107 @@ class Sessions(unittest.TestCase):
             initial = self.read_layout(control)
             self.assertEqual(initial['active_buffer'], 1)
 
-            os.write(fd, b'\x1b[116;5u')
+            os.write(fd, b'\x14')
             created = self.read_layout(control)
             self.assertEqual(created['active_buffer'], 2)
 
-            os.write(fd, b'\x1b[119;5u')
+            os.write(fd, b'\x17')
             closed = self.read_layout(control)
             self.assertEqual(closed['active_buffer'], 1)
 
-            os.write(fd, b'\x1b[119;5u')
+            os.write(fd, b'\x17')
             self.wait_for(lambda: self.run_rmux('ls').stdout == '')
             self.wait_for(lambda: process.poll() is not None)
         finally:
             control.close()
 
+    def test_alt_split_keys_create_shared_windows(self):
+        _, fd = self.start('new', 'alt-splits', '--', 'sh', '-i')
+        self.wait_for(lambda: self.run_rmux('ls').stdout == 'alt-splits\n')
+        control = self.attach_control('alt-splits')
+        try:
+            initial = self.read_layout(control)
+            self.assertEqual(initial['focused_window'], 1)
+            os.write(fd, b'\x1bv')
+            vertical = self.read_layout(control)
+            self.assertEqual(vertical['tree']['axis'], 'vertical')
+            self.assertEqual(len(self.window_leaves(vertical['tree'])), 2)
+
+            os.write(fd, b'\x1bb')
+            horizontal = self.read_layout(control)
+            self.assertEqual(horizontal['tree']['second']['axis'], 'horizontal')
+            self.assertEqual(len(self.window_leaves(horizontal['tree'])), 3)
+        finally:
+            control.close()
+
+
+    def test_buffer_rename_is_shared_without_changing_buffer_identity_or_order(self):
+        self.start('new', 'rename', '--', 'sh', '-i')
+        self.wait_for(lambda: self.run_rmux('ls').stdout == 'rename\n')
+        first = self.attach_control('rename')
+        second = None
+        third = None
+        try:
+            initial = self.read_layout(first)
+            self.assertEqual(initial['buffer_names'], {'1': '1'})
+
+            def buffer_views(node):
+                if node['kind'] == 'window':
+                    return [node['buffer']]
+                return buffer_views(node['first']) + buffer_views(node['second'])
+
+            self.send_frame(first, SPLIT_VERTICAL)
+            split_state = self.read_layout(first)
+            self.assertEqual(buffer_views(split_state['tree']), [1, 1])
+            self.send_frame(first, NEW_BUFFER)
+            created = self.read_layout(first)
+            self.assertEqual(created['buffers'], [1, 2])
+            self.assertEqual(created['buffer_names'], {'1': '1', '2': '2'})
+            self.assertEqual(buffer_views(created['tree']), [1, 2])
+
+            renamed_name = 'renamed 雪'
+            self.send_frame(first, RENAME_BUFFER,
+                            (1).to_bytes(8, 'big') + renamed_name.encode('utf-8'))
+            renamed = self.read_layout(first)
+            self.assertEqual(renamed['buffer_names']['1'], renamed_name)
+            self.assertEqual(renamed['buffers'], created['buffers'])
+            self.assertEqual(renamed['tree'], created['tree'])
+            self.assertEqual(renamed['focused_window'], created['focused_window'])
+            self.assertEqual(renamed['active_buffer'], created['active_buffer'])
+
+            second = self.attach_control('rename')
+            self.assertEqual(self.read_layout(second), renamed)
+            for action, expected_views in (
+                (PREVIOUS_BUFFER, [1, 1]),
+                (NEXT_BUFFER, [1, 2]),
+                (PREVIOUS_BUFFER, [1, 1]),
+            ):
+                self.send_frame(first, action)
+                first_state = self.read_layout(first)
+                second_state = self.read_layout(second)
+                self.assertEqual(first_state, second_state)
+                self.assertEqual(buffer_views(first_state['tree']), expected_views)
+                self.assertEqual(first_state['buffer_names']['1'], renamed_name)
+
+            self.send_frame(first, RENAME_BUFFER, (1).to_bytes(8, 'big') + b'\xff')
+            self.send_frame(first, RENAME_BUFFER,
+                            (1).to_bytes(8, 'big') + b'bad' + bytes([10]) + b'name')
+            third = self.attach_control('rename')
+            invalid_names = self.read_layout(third)
+            self.assertEqual(invalid_names['buffer_names']['1'], renamed_name)
+
+            self.send_frame(first, RENAME_BUFFER, (1).to_bytes(8, 'big'))
+            reset = self.read_layout(first)
+            self.assertEqual(reset['buffer_names']['1'], '1')
+            self.assertEqual(reset['buffers'], created['buffers'])
+            self.assertEqual(self.read_layout(second), reset)
+            self.assertEqual(self.read_layout(third), reset)
+        finally:
+            first.close()
+            if second is not None:
+                second.close()
+            if third is not None:
+                third.close()
 
     def test_buffers_keep_independent_screen_and_process_state(self):
         self.env['SHELL'] = '/bin/sh'
@@ -369,6 +457,42 @@ class Sessions(unittest.TestCase):
             if last is not None:
                 last.close()
 
+
+    def test_equalize_balances_layout_and_broadcasts_to_attachments(self):
+        _, terminal = self.start('new', 'equalize', '--', 'sh', '-i')
+        self.wait_for(lambda: self.run_rmux('ls').stdout == 'equalize\n')
+        first = self.attach_control('equalize')
+        second = self.attach_control('equalize')
+        try:
+            initial = self.read_layout(first)
+            self.assertEqual(initial, self.read_layout(second))
+
+            self.send_frame(first, SPLIT_VERTICAL)
+            self.read_layout(first)
+            self.read_layout(second)
+            self.send_frame(second, SPLIT_HORIZONTAL)
+            uneven = self.read_layout(first)
+            self.assertEqual(uneven, self.read_layout(second))
+            self.assertEqual(uneven['tree']['ratio'], 50)
+            self.assertEqual(uneven['tree']['second']['ratio'], 50)
+
+            os.write(terminal, b'\x1b=')
+            balanced = self.read_layout(first)
+            self.assertEqual(balanced, self.read_layout(second))
+            self.assertEqual(balanced['tree']['ratio'], 33)
+            self.assertEqual(balanced['tree']['second']['ratio'], 50)
+            self.assertEqual(balanced['tree']['axis'], 'vertical')
+            self.assertEqual(balanced['tree']['second']['axis'], 'horizontal')
+            self.assertEqual(balanced['focused_window'], uneven['focused_window'])
+            self.assertEqual(
+                [(window['id'], window['buffer'])
+                 for window in self.window_leaves(balanced['tree'])],
+                [(window['id'], window['buffer'])
+                 for window in self.window_leaves(uneven['tree'])],
+            )
+        finally:
+            first.close()
+            second.close()
     def test_buffer_size_uses_smallest_pane_across_clients(self):
         self.start('new', 'geometry', '--', 'sh', '-i')
         self.wait_for(lambda: self.run_rmux('ls').stdout == 'geometry\n')

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +50,7 @@ pub(crate) struct LayoutSnapshot {
     pub(crate) focused_window: u64,
     pub(crate) active_buffer: Option<u64>,
     pub(crate) buffers: Vec<u64>,
+    pub(crate) buffer_names: HashMap<u64, String>,
 }
 
 pub(crate) struct WindowLayout {
@@ -192,16 +195,21 @@ impl WindowLayout {
         resize(&mut self.tree, self.focused_window, direction).unwrap_or(false)
     }
 
+    pub(crate) fn equalize(&mut self) -> bool {
+        equalize_ratios(&mut self.tree).1
+    }
+
     pub(crate) fn replace_buffer(&mut self, old: u64, new: u64) -> bool {
         replace_buffer(&mut self.tree, old, new)
     }
 
-    pub(crate) fn snapshot(&self, buffers: &[u64]) -> Vec<u8> {
+    pub(crate) fn snapshot(&self, buffers: &[u64], buffer_names: &HashMap<u64, String>) -> Vec<u8> {
         serde_json::to_vec(&LayoutSnapshot {
             tree: self.tree.clone(),
             focused_window: self.focused_window,
             active_buffer: self.focused_buffer(),
             buffers: buffers.to_vec(),
+            buffer_names: buffer_names.clone(),
         })
         .expect("serializing a window layout cannot fail")
     }
@@ -580,11 +588,32 @@ fn resize(node: &mut WindowNode, focused: u64, direction: Direction) -> Option<b
             }
             // Move the split boundary in the requested direction.
             if matches!(direction, Direction::Right | Direction::Down) {
-                *ratio = (*ratio).saturating_add(5).min(90);
+                *ratio = (*ratio).saturating_add(5).min(99);
             } else {
-                *ratio = (*ratio).saturating_sub(5).max(10);
+                *ratio = (*ratio).saturating_sub(5).max(1);
             }
             Some(true)
+        }
+    }
+}
+
+fn equalize_ratios(node: &mut WindowNode) -> (usize, bool) {
+    match node {
+        WindowNode::Window { .. } => (1, false),
+        WindowNode::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            let (first_windows, first_changed) = equalize_ratios(first);
+            let (second_windows, second_changed) = equalize_ratios(second);
+            let total_windows = first_windows + second_windows;
+            let target_ratio =
+                ((first_windows * 100 + total_windows / 2) / total_windows).clamp(1, 99) as u8;
+            let changed = first_changed || second_changed || *ratio != target_ratio;
+            *ratio = target_ratio;
+            (total_windows, changed)
         }
     }
 }
@@ -612,7 +641,7 @@ fn replace_buffer(node: &mut WindowNode, old: u64, new: u64) -> bool {
 }
 #[cfg(test)]
 mod tests {
-    use super::{Axis, Direction, WindowLayout};
+    use super::{Axis, Direction, HashMap, WindowLayout};
 
     #[test]
     fn moving_window_swaps_positions_and_keeps_focus() {
@@ -622,7 +651,9 @@ mod tests {
         assert!(layout.focus_direction(Direction::Up));
         assert!(layout.move_focused_window(Direction::Left));
 
-        let snapshot: serde_json::Value = serde_json::from_slice(&layout.snapshot(&[1])).unwrap();
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&layout.snapshot(&[1], &HashMap::from([(1, "1".to_owned())])))
+                .unwrap();
         assert_eq!(snapshot["focused_window"], 2);
         assert_eq!(snapshot["tree"]["first"]["id"], 2);
         assert_eq!(snapshot["tree"]["second"]["first"]["id"], 1);
@@ -631,7 +662,7 @@ mod tests {
 }
 #[cfg(test)]
 mod geometry_tests {
-    use super::{Axis, WindowLayout};
+    use super::{Axis, HashMap, WindowLayout};
 
     #[test]
     fn geometry_places_nested_splits_and_dividers() {
@@ -730,9 +761,75 @@ mod geometry_tests {
         assert!(layout.is_buffer_visible(8));
         assert!(!layout.is_buffer_visible(9));
 
-        let snapshot: super::LayoutSnapshot =
-            serde_json::from_slice(&layout.snapshot(&[7, 8])).unwrap();
+        let snapshot: super::LayoutSnapshot = serde_json::from_slice(&layout.snapshot(
+            &[7, 8],
+            &HashMap::from([(7, "7".to_owned()), (8, "8".to_owned())]),
+        ))
+        .unwrap();
         assert_eq!(snapshot.buffers, vec![7, 8]);
         assert_eq!(snapshot.geometry(20, 10).windows.len(), 3);
+    }
+
+    #[test]
+    fn equalize_balances_pane_areas_by_descendant_window_count() {
+        let mut layout = WindowLayout::new(1);
+        assert!(layout.split_focused(Axis::Vertical));
+        assert!(layout.split_focused(Axis::Horizontal));
+        let before: serde_json::Value =
+            serde_json::from_slice(&layout.snapshot(&[1], &HashMap::from([(1, "1".to_owned())])))
+                .unwrap();
+
+        assert!(layout.equalize());
+
+        let after: serde_json::Value =
+            serde_json::from_slice(&layout.snapshot(&[1], &HashMap::from([(1, "1".to_owned())])))
+                .unwrap();
+        assert_eq!(after["tree"]["first"], before["tree"]["first"]);
+        assert_eq!(
+            after["tree"]["second"]["first"],
+            before["tree"]["second"]["first"]
+        );
+        assert_eq!(
+            after["tree"]["second"]["second"],
+            before["tree"]["second"]["second"]
+        );
+        assert_eq!(after["focused_window"], before["focused_window"]);
+        assert_eq!(after["tree"]["ratio"], 33);
+        assert_eq!(after["tree"]["second"]["ratio"], 50);
+
+        let areas: Vec<_> = layout
+            .geometry(101, 31)
+            .windows
+            .iter()
+            .map(|window| u32::from(window.rect.width) * u32::from(window.rect.height))
+            .collect();
+        let smallest = *areas.iter().min().unwrap();
+        let largest = *areas.iter().max().unwrap();
+        assert!(
+            largest - smallest <= largest / 10,
+            "pane areas were {areas:?}"
+        );
+        assert!(!layout.equalize());
+    }
+
+    #[test]
+    fn resize_can_adjust_a_split_ratio_below_ten_percent() {
+        let mut layout = WindowLayout {
+            tree: super::WindowNode::Split {
+                axis: Axis::Vertical,
+                ratio: 9,
+                first: Box::new(super::WindowNode::Window { id: 1, buffer: 1 }),
+                second: Box::new(super::WindowNode::Window { id: 2, buffer: 1 }),
+            },
+            focused_window: 1,
+            next_window: 3,
+        };
+
+        assert!(layout.resize_focused_window(super::Direction::Left));
+
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&layout.snapshot(&[1], &HashMap::from([(1, "1".to_owned())])))
+                .unwrap();
+        assert_eq!(snapshot["tree"]["ratio"], 4);
     }
 }

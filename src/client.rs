@@ -9,7 +9,7 @@ use crate::Request;
 use crate::input::{InputAction, InputDecoder};
 use crate::render::{BUFFER_OUTPUT, BUFFER_SNAPSHOT, Renderer};
 use crate::runtime::{SessionPaths, read_response, write_request};
-use crate::server::{CLOSE, INPUT, RESIZE, WINDOW_STATE, read_frame, write_frame};
+use crate::server::{CLOSE, INPUT, RENAME_BUFFER, RESIZE, WINDOW_STATE, read_frame, write_frame};
 
 struct RawMode;
 struct TerminalScreen;
@@ -42,10 +42,72 @@ impl Drop for TerminalScreen {
     fn drop(&mut self) {
         let _ = crossterm::execute!(
             io::stdout(),
-            crossterm::style::ResetColor,
+            crossterm::style::SetAttribute(crossterm::style::Attribute::Reset),
             crossterm::cursor::Show,
             crossterm::terminal::LeaveAlternateScreen
         );
+    }
+}
+
+struct RenamePrompt {
+    buffer: u64,
+    name: String,
+    pending_utf8: Vec<u8>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromptResult {
+    Editing,
+    Commit,
+    Cancel,
+}
+
+impl RenamePrompt {
+    fn new(buffer: u64, name: String) -> Self {
+        Self {
+            buffer,
+            name,
+            pending_utf8: Vec::new(),
+        }
+    }
+
+    fn display(&self) -> String {
+        format!("Rename {}: {}", self.buffer, self.name)
+    }
+
+    fn feed(&mut self, bytes: &[u8]) -> (PromptResult, usize) {
+        for (index, &byte) in bytes.iter().enumerate() {
+            match byte {
+                b'\r' | b'\n' => return (PromptResult::Commit, index + 1),
+                b'\x1b' | b'\x03' => return (PromptResult::Cancel, bytes.len()),
+                b'\x08' | b'\x7f' => {
+                    self.pending_utf8.clear();
+                    self.name.pop();
+                }
+                b'\x15' => {
+                    self.pending_utf8.clear();
+                    self.name.clear();
+                }
+                byte if byte.is_ascii_control() => self.pending_utf8.clear(),
+                byte if byte.is_ascii() => self.name.push(byte as char),
+                byte => self.push_utf8_byte(byte),
+            }
+        }
+        (PromptResult::Editing, bytes.len())
+    }
+
+    fn push_utf8_byte(&mut self, byte: u8) {
+        self.pending_utf8.push(byte);
+        match std::str::from_utf8(&self.pending_utf8) {
+            Ok(character) => {
+                if !character.chars().any(char::is_control) {
+                    self.name.push_str(character);
+                }
+                self.pending_utf8.clear();
+            }
+            Err(error) if error.error_len().is_none() => {}
+            Err(_) => self.pending_utf8.clear(),
+        }
     }
 }
 
@@ -95,6 +157,7 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
     let mut input_buffer = [0u8; 16 * 1024];
     let mut renderer = Renderer::default();
     let mut input_decoder = InputDecoder::default();
+    let mut rename_prompt = None;
 
     loop {
         if interrupted.load(Ordering::Acquire) {
@@ -102,7 +165,15 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
             break;
         }
         if let Some(action) = input_decoder.expire(Instant::now()) {
-            write_input_action(&mut server, action)?;
+            handle_input_action(
+                &mut server,
+                &mut input_decoder,
+                &mut renderer,
+                &mut rename_prompt,
+                &mut output,
+                last_size,
+                action,
+            )?;
         }
         let timeout = input_decoder
             .remaining_timeout(Instant::now())
@@ -135,7 +206,15 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
                 let _ = write_frame(&mut server, 3, &[]);
                 break;
             }
-            send_input(&mut server, &mut input_decoder, &input_buffer[..length])?;
+            send_input(
+                &mut server,
+                &mut input_decoder,
+                &mut renderer,
+                &mut rename_prompt,
+                &mut output,
+                last_size,
+                &input_buffer[..length],
+            )?;
         }
         if descriptors[1].revents & libc::POLLIN != 0 {
             match read_frame(&mut server)? {
@@ -151,6 +230,13 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
                     let snapshot = serde_json::from_slice(&bytes)
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
                     renderer.set_layout(snapshot);
+                    if rename_prompt
+                        .as_ref()
+                        .is_some_and(|prompt: &RenamePrompt| !renderer.has_buffer(prompt.buffer))
+                    {
+                        rename_prompt = None;
+                        renderer.set_prompt(None);
+                    }
                     renderer.draw(&mut output, last_size.0, last_size.1)?;
                 }
                 Some((CLOSE, _)) | None => break,
@@ -182,20 +268,277 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn send_input(server: &mut UnixStream, decoder: &mut InputDecoder, bytes: &[u8]) -> io::Result<()> {
-    if decoder.is_idle() && !bytes.contains(&b'\x1b') {
+fn send_input(
+    server: &mut UnixStream,
+    decoder: &mut InputDecoder,
+    renderer: &mut Renderer,
+    rename_prompt: &mut Option<RenamePrompt>,
+    output: &mut impl io::Write,
+    size: (u16, u16),
+    bytes: &[u8],
+) -> io::Result<()> {
+    if rename_prompt.is_some() {
+        return handle_prompt_input(
+            server,
+            decoder,
+            renderer,
+            rename_prompt,
+            output,
+            size,
+            bytes,
+        );
+    }
+    if !decoder.should_decode(bytes) {
         return write_frame(server, INPUT, bytes);
     }
-    for action in decoder.feed(bytes) {
-        write_input_action(server, action)?;
+    let actions = decoder.feed(bytes);
+    for action in actions {
+        handle_input_action(
+            server,
+            decoder,
+            renderer,
+            rename_prompt,
+            output,
+            size,
+            action,
+        )?;
     }
     Ok(())
 }
 
-fn write_input_action(server: &mut UnixStream, action: InputAction) -> io::Result<()> {
+fn handle_input_action(
+    server: &mut UnixStream,
+    decoder: &mut InputDecoder,
+    renderer: &mut Renderer,
+    rename_prompt: &mut Option<RenamePrompt>,
+    output: &mut impl io::Write,
+    size: (u16, u16),
+    action: InputAction,
+) -> io::Result<()> {
+    if rename_prompt.is_some() {
+        return match action {
+            InputAction::Bytes(bytes) => handle_prompt_input(
+                server,
+                decoder,
+                renderer,
+                rename_prompt,
+                output,
+                size,
+                &bytes,
+            ),
+            InputAction::Command(_) => Ok(()),
+        };
+    }
     match action {
         InputAction::Bytes(bytes) => write_frame(server, INPUT, &bytes),
+        InputAction::Command(command)
+            if command.kind == RENAME_BUFFER && command.payload.is_empty() =>
+        {
+            if let Some((buffer, name)) = renderer.active_buffer() {
+                decoder.reset();
+                let prompt = RenamePrompt::new(buffer, name);
+                renderer.set_prompt(Some(prompt.display()));
+                *rename_prompt = Some(prompt);
+                renderer.draw(output, size.0, size.1)?;
+            }
+            Ok(())
+        }
         InputAction::Command(command) => write_frame(server, command.kind, command.payload),
+    }
+}
+
+fn handle_prompt_input(
+    server: &mut UnixStream,
+    decoder: &mut InputDecoder,
+    renderer: &mut Renderer,
+    rename_prompt: &mut Option<RenamePrompt>,
+    output: &mut impl io::Write,
+    size: (u16, u16),
+    bytes: &[u8],
+) -> io::Result<()> {
+    let Some(prompt) = rename_prompt.as_mut() else {
+        return send_input(
+            server,
+            decoder,
+            renderer,
+            rename_prompt,
+            output,
+            size,
+            bytes,
+        );
+    };
+    let (result, consumed) = prompt.feed(bytes);
+    match result {
+        PromptResult::Editing => {
+            renderer.set_prompt(Some(prompt.display()));
+            renderer.draw(output, size.0, size.1)?;
+        }
+        PromptResult::Commit => {
+            let buffer = prompt.buffer;
+            let name = prompt.name.as_bytes().to_vec();
+            decoder.reset();
+            *rename_prompt = None;
+            renderer.set_prompt(None);
+            let mut payload = Vec::with_capacity(8 + name.len());
+            payload.extend_from_slice(&buffer.to_be_bytes());
+            payload.extend_from_slice(&name);
+            write_frame(server, RENAME_BUFFER, &payload)?;
+            renderer.draw(output, size.0, size.1)?;
+            if consumed < bytes.len() {
+                send_input(
+                    server,
+                    decoder,
+                    renderer,
+                    rename_prompt,
+                    output,
+                    size,
+                    &bytes[consumed..],
+                )?;
+            }
+        }
+        PromptResult::Cancel => {
+            decoder.reset();
+            *rename_prompt = None;
+            renderer.set_prompt(None);
+            renderer.draw(output, size.0, size.1)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::{LayoutSnapshot, WindowNode};
+
+    fn renderer_with_buffer() -> Renderer {
+        let mut renderer = Renderer::default();
+        renderer.set_layout(LayoutSnapshot {
+            tree: WindowNode::Window { id: 1, buffer: 7 },
+            focused_window: 1,
+            active_buffer: Some(7),
+            buffers: vec![7],
+            buffer_names: std::collections::HashMap::from([(7, "7".into())]),
+        });
+        renderer
+    }
+
+    fn send(
+        server: &mut UnixStream,
+        decoder: &mut InputDecoder,
+        renderer: &mut Renderer,
+        prompt: &mut Option<RenamePrompt>,
+        output: &mut Vec<u8>,
+        bytes: &[u8],
+    ) {
+        send_input(server, decoder, renderer, prompt, output, (20, 3), bytes).unwrap();
+    }
+
+    #[test]
+    fn ctrl_r_commits_the_name_without_forwarding_prompt_text() {
+        let (mut client, mut peer) = UnixStream::pair().unwrap();
+        let mut decoder = InputDecoder::default();
+        let mut renderer = renderer_with_buffer();
+        let mut prompt = None;
+        let mut output = Vec::new();
+
+        send(
+            &mut client,
+            &mut decoder,
+            &mut renderer,
+            &mut prompt,
+            &mut output,
+            b"\x12",
+        );
+        send(
+            &mut client,
+            &mut decoder,
+            &mut renderer,
+            &mut prompt,
+            &mut output,
+            b"\x15renamed \xe9",
+        );
+        send(
+            &mut client,
+            &mut decoder,
+            &mut renderer,
+            &mut prompt,
+            &mut output,
+            b"\x9b\xaa\r",
+        );
+
+        let mut expected = 7u64.to_be_bytes().to_vec();
+        expected.extend_from_slice("renamed 雪".as_bytes());
+        assert_eq!(
+            crate::server::read_frame(&mut peer).unwrap(),
+            Some((RENAME_BUFFER, expected))
+        );
+        assert!(prompt.is_none());
+    }
+
+    #[test]
+    fn ctrl_u_resets_the_buffer_label_to_its_numeric_id() {
+        let (mut client, mut peer) = UnixStream::pair().unwrap();
+        let mut decoder = InputDecoder::default();
+        let mut renderer = renderer_with_buffer();
+        let mut prompt = None;
+        let mut output = Vec::new();
+
+        send(
+            &mut client,
+            &mut decoder,
+            &mut renderer,
+            &mut prompt,
+            &mut output,
+            b"\x12",
+        );
+        send(
+            &mut client,
+            &mut decoder,
+            &mut renderer,
+            &mut prompt,
+            &mut output,
+            b"\x15\r",
+        );
+
+        assert_eq!(
+            crate::server::read_frame(&mut peer).unwrap(),
+            Some((RENAME_BUFFER, 7u64.to_be_bytes().to_vec()))
+        );
+    }
+
+    #[test]
+    fn escape_cancels_the_prompt_without_sending_text_to_the_shell() {
+        let (mut client, mut peer) = UnixStream::pair().unwrap();
+        let mut decoder = InputDecoder::default();
+        let mut renderer = renderer_with_buffer();
+        let mut prompt = None;
+        let mut output = Vec::new();
+
+        send(
+            &mut client,
+            &mut decoder,
+            &mut renderer,
+            &mut prompt,
+            &mut output,
+            b"\x12",
+        );
+        send(
+            &mut client,
+            &mut decoder,
+            &mut renderer,
+            &mut prompt,
+            &mut output,
+            b"not-a-command\x1b",
+        );
+
+        peer.set_nonblocking(true).unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            peer.read(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(prompt.is_none());
     }
 }
 

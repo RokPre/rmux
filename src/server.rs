@@ -34,6 +34,8 @@ pub(crate) const MOVE_WINDOW: u8 = 12;
 pub(crate) const RESIZE_WINDOW: u8 = 13;
 pub(crate) const REORDER_BUFFER_LEFT: u8 = 14;
 pub(crate) const REORDER_BUFFER_RIGHT: u8 = 15;
+pub(crate) const RENAME_BUFFER: u8 = 16;
+pub(crate) const EQUALIZE_WINDOWS: u8 = 17;
 pub(crate) const CLOSE: u8 = 2;
 pub(crate) const WINDOW_STATE: u8 = 3;
 pub(crate) const BUFFER_SNAPSHOT: u8 = 4;
@@ -65,6 +67,7 @@ struct Buffer {
 struct SessionState {
     clients: HashMap<u64, Client>,
     buffers: HashMap<u64, Buffer>,
+    buffer_names: HashMap<u64, String>,
     order: Vec<u64>,
     layout: WindowLayout,
     next_buffer: u64,
@@ -114,6 +117,7 @@ pub(crate) fn run_server(args: &[std::ffi::OsString]) -> io::Result<()> {
         state: Mutex::new(SessionState {
             clients: HashMap::new(),
             buffers: HashMap::from([(1, initial_buffer)]),
+            buffer_names: HashMap::from([(1, "1".to_owned())]),
             order: vec![1],
             layout: WindowLayout::new(1),
             next_buffer: 2,
@@ -406,6 +410,8 @@ fn attach_client(
             RESIZE_WINDOW if payload.len() == 1 => resize_focused_window(&session, payload[0]),
             REORDER_BUFFER_LEFT if payload.is_empty() => reorder_buffer(&session, false),
             REORDER_BUFFER_RIGHT if payload.is_empty() => reorder_buffer(&session, true),
+            EQUALIZE_WINDOWS if payload.is_empty() => equalize_windows(&session),
+            RENAME_BUFFER => rename_buffer(&session, &payload),
             DETACH => break,
             _ => break,
         }
@@ -452,6 +458,7 @@ fn create_buffer(session: &Arc<Session>) {
         }
         state.order.push(id);
         state.buffers.insert(id, buffer);
+        state.buffer_names.insert(id, id.to_string());
         state.layout.set_focused_buffer(id);
         resize_visible_buffers(&mut state);
         send_layout(&mut state);
@@ -483,6 +490,7 @@ fn close_active_buffer(session: &Session) {
     if let Some(mut buffer) = state.buffers.remove(&closing) {
         terminate_child(buffer.child.as_mut(), buffer.session_id);
     }
+    state.buffer_names.remove(&closing);
     resize_visible_buffers(&mut state);
     send_layout(&mut state);
     send_visible_buffer_snapshots(&mut state);
@@ -581,15 +589,48 @@ fn resize_focused_window(session: &Session, encoded_direction: u8) {
     }
 }
 
+fn equalize_windows(session: &Session) {
+    let mut state = lock_state(session);
+    if state.layout.equalize() {
+        resize_visible_buffers(&mut state);
+        send_layout(&mut state);
+        send_visible_buffer_snapshots(&mut state);
+    }
+}
+
 fn send_layout(state: &mut SessionState) {
-    let snapshot = state.layout.snapshot(&state.order);
+    let snapshot = state.layout.snapshot(&state.order, &state.buffer_names);
     broadcast(state, Outgoing::Layout(snapshot));
 }
 fn send_layout_to_client(state: &mut SessionState, id: u64) {
-    let snapshot = state.layout.snapshot(&state.order);
+    let snapshot = state.layout.snapshot(&state.order, &state.buffer_names);
     if let Some(client) = state.clients.get(&id) {
         let _ = client.sender.try_send(Outgoing::Layout(snapshot));
     }
+}
+fn rename_buffer(session: &Session, payload: &[u8]) {
+    if payload.len() < 8 {
+        return;
+    }
+    let target = u64::from_be_bytes(payload[..8].try_into().expect("eight-byte buffer ID"));
+    let Ok(name) = std::str::from_utf8(&payload[8..]) else {
+        return;
+    };
+    if name.chars().any(char::is_control) {
+        return;
+    }
+
+    let mut state = lock_state(session);
+    if !state.buffers.contains_key(&target) {
+        return;
+    }
+    let name = if name.is_empty() {
+        target.to_string()
+    } else {
+        name.to_owned()
+    };
+    state.buffer_names.insert(target, name);
+    send_layout(&mut state);
 }
 fn send_visible_buffer_snapshots(state: &mut SessionState) {
     let snapshots: Vec<_> = state
@@ -695,6 +736,7 @@ fn reap_exited_buffers(session: &Session) -> io::Result<bool> {
         if let Some(mut buffer) = state.buffers.remove(id) {
             terminate_child(buffer.child.as_mut(), buffer.session_id);
         }
+        state.buffer_names.remove(id);
     }
     state.order.retain(|id| !exited_set.contains(id));
     if state.order.is_empty() {
