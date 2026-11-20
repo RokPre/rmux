@@ -236,14 +236,14 @@ fn apply_cell_style(
     previous: Option<CellStyle>,
     style: CellStyle,
 ) -> io::Result<()> {
+    if previous.is_none() {
+        queue!(output, SetAttribute(Attribute::Reset))?;
+    }
     if previous.is_none_or(|previous| previous.foreground != style.foreground) {
         queue!(output, SetForegroundColor(style.foreground))?;
     }
     if previous.is_none_or(|previous| previous.background != style.background) {
         queue!(output, SetBackgroundColor(style.background))?;
-    }
-    if previous.is_none() {
-        queue!(output, SetAttribute(Attribute::Reset))?;
     }
     if previous.is_none_or(|previous| previous.bold != style.bold || previous.dim != style.dim) {
         if previous.is_some() {
@@ -474,6 +474,46 @@ mod tests {
         assert_eq!(screen.cell(2, 3).unwrap().contents(), "界");
         assert!(screen.cell(2, 4).unwrap().is_wide_continuation());
         assert_eq!(screen.cell(2, 5).unwrap().contents(), "x");
+    }
+
+    #[test]
+    fn first_pane_cell_retains_its_colors_before_default_text() {
+        let mut renderer = Renderer::default();
+        let mut snapshot = Vec::from(1u64.to_be_bytes());
+        snapshot.extend_from_slice(&2u16.to_be_bytes());
+        snapshot.extend_from_slice(&4u16.to_be_bytes());
+        snapshot.extend_from_slice(b"\x1b[31;44mX\x1b[0mY");
+        renderer.apply_frame(BUFFER_SNAPSHOT, &snapshot).unwrap();
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 1 },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1],
+            buffer_names: HashMap::from([(1, "1".into())]),
+        });
+
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 4, 3).unwrap();
+        let mut terminal = Parser::new(
+            std::num::NonZeroU16::new(3).unwrap(),
+            std::num::NonZeroU16::new(4).unwrap(),
+            0,
+        );
+        terminal.process(&output);
+        let screen = terminal.screen();
+        let first = screen.cell(1, 0).unwrap();
+        assert_eq!(first.contents(), "X");
+        if std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
+            assert_eq!(first.fgcolor(), VtColor::Default);
+            assert_eq!(first.bgcolor(), VtColor::Default);
+        } else {
+            assert_eq!(first.fgcolor(), VtColor::Idx(1));
+            assert_eq!(first.bgcolor(), VtColor::Idx(4));
+        }
+        let next = screen.cell(1, 1).unwrap();
+        assert_eq!(next.contents(), "Y");
+        assert_eq!(next.fgcolor(), VtColor::Default);
+        assert_eq!(next.bgcolor(), VtColor::Default);
     }
 
     #[test]

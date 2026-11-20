@@ -87,6 +87,7 @@
       - [x] TODO: Verify buffer rename behavior [verify_buffer_rename](#verify_buffer_rename)
       - [ ] TODO: Verify rmux window equalization [verify_equalize](#verify_equalize)
       - [x] TODO: Verify Atuin cursor-position queries [verify_atuin](#verify_atuin)
+      - [x] TODO: Verify first pane text colors [verify_pane_color](#verify_pane_color)
     - [ ] TODO: Update user-facing usage [usage_docs](#usage_docs)
       - [ ] TODO: Document session, buffer and rmux window terminology [document_terms](#document_terms)
       - [ ] TODO: Document the supported keyboard controls and conflicts [document_controls](#document_controls)
@@ -511,7 +512,7 @@ Group end-to-end acceptance and usage documentation into one coherent delivery c
 - Role: molecule
 - Scope: coordinated
 - Difficulty: 2 kyu
-- Children: verify_cli & verify_launchers & verify_detach & verify_hidden & verify_splits & verify_independent_switch & verify_window_close & verify_buffer_close & verify_buffer_line & verify_window_controls & verify_shared_clients & verify_shared_size & verify_centering & verify_resize_events & verify_keys & verify_application_input & verify_st_patch & verify_buffer_rename & verify_equalize & verify_atuin
+- Children: verify_cli & verify_launchers & verify_detach & verify_hidden & verify_splits & verify_independent_switch & verify_window_close & verify_buffer_close & verify_buffer_line & verify_window_controls & verify_shared_clients & verify_shared_size & verify_centering & verify_resize_events & verify_keys & verify_application_input & verify_st_patch & verify_buffer_rename & verify_equalize & verify_atuin & verify_pane_color
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
 Automated runtime checks pass, and the user confirmed Alt-V and Alt-B in st without the rmux-specific patch. Complete real desktop verification of all key combinations, SGR 59 warning behavior, buffer-line background, equalization and the i3 launcher path. The former rmux-specific st keybinding patch is incompatible with the current ordinary-key decoder.
@@ -746,6 +747,13 @@ Automated geometry and two-client integration tests confirm that ordinary Alt+= 
 - Scope: coordinated
 
 Atuin interactive history search previously timed out because the rmux buffer terminal did not answer CSI 6 n. The runtime now responds from its per-buffer terminal parser. Automated tests cover fragmented requests and cursor replies with and without attached clients. The user tested the installed fix in a new session and reported that Atuin appears to work.
+
+## verify_pane_color
+
+- Role: atomic
+- Scope: local
+
+The user reported that the first uncolored text appeared gray after the buffer line. Fixed a renderer ordering bug that reset the first pane cell after setting its colors. A color-enabled regression test verifies the first colored cell and subsequent default-colored cell. The user opened a fresh session through Super+Ctrl+T, cleared the screen, and confirmed the color was correct.
 
 # DONEs
 
