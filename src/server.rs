@@ -679,13 +679,13 @@ fn send_visible_buffer_snapshots(state: &mut SessionState) {
         .into_iter()
         .filter_map(|id| {
             state.buffers.get(&id).map(|buffer| {
-                let (rows, cols) = buffer.parser.screen().size();
-                (
-                    id,
-                    rows.get(),
-                    cols.get(),
-                    buffer.parser.screen().contents_formatted().into_bytes(),
-                )
+                let screen = buffer.parser.screen();
+                let (rows, cols) = screen.size();
+                let mut contents = screen.contents_formatted().into_bytes();
+                if screen.bracketed_paste() {
+                    contents.extend_from_slice(b"\x1b[?2004h");
+                }
+                (id, rows.get(), cols.get(), contents)
             })
         })
         .collect();

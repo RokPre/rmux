@@ -7,6 +7,8 @@ use crate::server::{
 };
 
 const SEQUENCE_TIMEOUT: Duration = Duration::from_millis(40);
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct InputCommand {
@@ -120,6 +122,7 @@ pub(crate) struct InputDecoder {
     pending: Vec<u8>,
     last_input: Option<Instant>,
     bindings: Vec<Binding>,
+    in_bracketed_paste: bool,
 }
 
 impl Default for InputDecoder {
@@ -128,6 +131,7 @@ impl Default for InputDecoder {
             pending: Vec::new(),
             last_input: None,
             bindings: BINDINGS.iter().map(|(s, k, p)| binding(s, *k, p)).collect(),
+            in_bracketed_paste: false,
         }
     }
 }
@@ -138,23 +142,27 @@ impl InputDecoder {
             pending: Vec::new(),
             last_input: None,
             bindings: configured_bindings(config),
+            in_bracketed_paste: false,
         }
     }
     pub fn is_idle(&self) -> bool {
-        self.pending.is_empty()
+        self.pending.is_empty() && !self.in_bracketed_paste
     }
     pub fn should_decode(&self, bytes: &[u8]) -> bool {
         !self.is_idle()
             || bytes.iter().any(|byte| {
-                self.bindings
-                    .iter()
-                    .any(|binding| binding.sequence.first() == Some(byte))
+                BRACKETED_PASTE_START.first() == Some(byte)
+                    || self
+                        .bindings
+                        .iter()
+                        .any(|binding| binding.sequence.first() == Some(byte))
             })
     }
 
     pub fn reset(&mut self) {
         self.pending.clear();
         self.last_input = None;
+        self.in_bracketed_paste = false;
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<InputAction> {
@@ -166,6 +174,24 @@ impl InputDecoder {
         let mut passthrough = Vec::new();
 
         for &byte in bytes {
+            if self.in_bracketed_paste {
+                self.pending.push(byte);
+                loop {
+                    if self.pending == BRACKETED_PASTE_END {
+                        passthrough.extend_from_slice(&self.pending);
+                        self.pending.clear();
+                        self.in_bracketed_paste = false;
+                        self.last_input = None;
+                        break;
+                    }
+                    if BRACKETED_PASTE_END.starts_with(&self.pending) {
+                        break;
+                    }
+                    passthrough.push(self.pending.remove(0));
+                }
+                continue;
+            }
+
             if self.pending.is_empty() && byte != b'\x1b' {
                 if let Some(binding) = self
                     .bindings
@@ -183,6 +209,14 @@ impl InputDecoder {
             self.pending.push(byte);
             self.last_input = Some(now);
             loop {
+                if self.pending == BRACKETED_PASTE_START {
+                    flush_passthrough(&mut actions, &mut passthrough);
+                    passthrough.extend_from_slice(&self.pending);
+                    self.pending.clear();
+                    self.last_input = None;
+                    self.in_bracketed_paste = true;
+                    break;
+                }
                 if let Some(binding) = self
                     .bindings
                     .iter()
@@ -194,10 +228,11 @@ impl InputDecoder {
                     self.last_input = None;
                     break;
                 }
-                if self
-                    .bindings
-                    .iter()
-                    .any(|binding| binding.sequence.starts_with(&self.pending))
+                if BRACKETED_PASTE_START.starts_with(&self.pending)
+                    || self
+                        .bindings
+                        .iter()
+                        .any(|binding| binding.sequence.starts_with(&self.pending))
                 {
                     break;
                 }
@@ -215,6 +250,9 @@ impl InputDecoder {
     }
 
     pub fn remaining_timeout(&self, now: Instant) -> Option<Duration> {
+        if self.in_bracketed_paste {
+            return None;
+        }
         self.last_input
             .map(|last_input| SEQUENCE_TIMEOUT.saturating_sub(now.duration_since(last_input)))
     }
@@ -401,5 +439,50 @@ mod tests {
                 payload: b""
             })]
         );
+    }
+    #[test]
+    fn bracketed_paste_preserves_split_delimiters_and_ignores_shortcuts() {
+        let mut decoder = InputDecoder::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            decoder.feed_at(b"before\x1b[20", now),
+            vec![InputAction::Bytes(b"before".to_vec())]
+        );
+        assert_eq!(
+            decoder.feed_at(b"0~\x12\n\x1bv", now + Duration::from_millis(1)),
+            vec![InputAction::Bytes(b"\x1b[200~\x12\n\x1bv".to_vec())]
+        );
+        assert_eq!(
+            decoder.feed_at(b"\x1b[20", now + Duration::from_millis(2)),
+            Vec::<InputAction>::new()
+        );
+        assert_eq!(
+            decoder.feed_at(b"1~\x12", now + Duration::from_millis(3)),
+            vec![
+                InputAction::Bytes(b"\x1b[201~".to_vec()),
+                InputAction::Command(InputCommand {
+                    kind: RENAME_BUFFER,
+                    payload: b"",
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn paste_mode_does_not_expire_partial_end_delimiter() {
+        let mut decoder = InputDecoder::default();
+        let now = Instant::now();
+        assert_eq!(
+            decoder.feed_at(b"\x1b[200~text\x1b[20", now),
+            vec![InputAction::Bytes(b"\x1b[200~text".to_vec())]
+        );
+        assert_eq!(decoder.remaining_timeout(now + SEQUENCE_TIMEOUT), None);
+        assert_eq!(decoder.expire(now + SEQUENCE_TIMEOUT), None);
+        assert_eq!(
+            decoder.feed_at(b"1~", now + SEQUENCE_TIMEOUT + Duration::from_secs(1)),
+            vec![InputAction::Bytes(b"\x1b[201~".to_vec())]
+        );
+        assert!(decoder.is_idle());
     }
 }

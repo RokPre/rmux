@@ -18,6 +18,7 @@ pub(crate) struct Renderer {
     snapshot: Option<LayoutSnapshot>,
     parsers: HashMap<u64, Parser>,
     prompt: Option<String>,
+    bracketed_paste: Option<bool>,
     config: crate::config::Config,
 }
 
@@ -33,6 +34,7 @@ impl Renderer {
             snapshot: None,
             parsers: HashMap::new(),
             prompt: None,
+            bracketed_paste: None,
             config,
         }
     }
@@ -96,10 +98,22 @@ impl Renderer {
         self.prompt = prompt;
     }
 
-    pub(crate) fn draw(&self, output: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> {
+    pub(crate) fn draw(&mut self, output: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return Ok(());
         };
+        let bracketed_paste = self.prompt.is_none()
+            && snapshot.active_buffer
+                .and_then(|buffer| self.parsers.get(&buffer))
+                .is_some_and(|parser| parser.screen().bracketed_paste());
+        if self.bracketed_paste != Some(bracketed_paste) {
+            if bracketed_paste {
+                queue!(output, crossterm::event::EnableBracketedPaste)?;
+            } else {
+                queue!(output, crossterm::event::DisableBracketedPaste)?;
+            }
+            self.bracketed_paste = Some(bracketed_paste);
+        }
         let geometry = snapshot.geometry(cols, rows);
         queue!(output, Hide)?;
         if rows >= 3 {
@@ -614,6 +628,41 @@ fn invalid_frame(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bracketed_paste_follows_focused_buffer_and_rename_prompt() {
+        let mut renderer = Renderer::default();
+        for (id, mode) in [(1u64, b"\x1b[?2004h".as_slice()), (2, b"".as_slice())] {
+            let mut snapshot = Vec::from(id.to_be_bytes());
+            snapshot.extend_from_slice(&2u16.to_be_bytes());
+            snapshot.extend_from_slice(&10u16.to_be_bytes());
+            snapshot.extend_from_slice(mode);
+            renderer.apply_frame(BUFFER_SNAPSHOT, &snapshot).unwrap();
+        }
+        let layout = |buffer| LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer },
+            focused_window: 1,
+            active_buffer: Some(buffer),
+            buffers: vec![1, 2],
+            buffer_names: HashMap::new(),
+        };
+        renderer.set_layout(layout(1));
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 10, 3).unwrap();
+        assert!(output.windows(8).any(|bytes| bytes == b"\x1b[?2004h"));
+        output.clear();
+        renderer.set_prompt(Some("rename".into()));
+        renderer.draw(&mut output, 10, 3).unwrap();
+        assert!(output.windows(8).any(|bytes| bytes == b"\x1b[?2004l"));
+        output.clear();
+        renderer.set_prompt(None);
+        renderer.draw(&mut output, 10, 3).unwrap();
+        assert!(output.windows(8).any(|bytes| bytes == b"\x1b[?2004h"));
+        output.clear();
+        renderer.set_layout(layout(2));
+        renderer.draw(&mut output, 10, 3).unwrap();
+        assert!(output.windows(8).any(|bytes| bytes == b"\x1b[?2004l"));
+    }
 
     #[test]
     fn snapshots_initialize_and_output_updates_the_matching_buffer() {

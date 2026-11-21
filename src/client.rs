@@ -42,6 +42,7 @@ impl Drop for TerminalScreen {
     fn drop(&mut self) {
         let _ = crossterm::execute!(
             io::stdout(),
+            crossterm::event::DisableBracketedPaste,
             crossterm::style::SetAttribute(crossterm::style::Attribute::Reset),
             crossterm::cursor::Show,
             crossterm::terminal::LeaveAlternateScreen

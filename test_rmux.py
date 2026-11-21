@@ -2,6 +2,7 @@ import fcntl
 import json
 import os
 import pty
+import select
 import socket
 import subprocess
 import tempfile
@@ -109,6 +110,53 @@ class Sessions(unittest.TestCase):
             daemon=True,
         ).start()
         return process, master
+
+    def test_bracketed_paste_reaches_application_unchanged(self):
+        payload = b'\x1b[200~first line\nsecond\x14 line\n\x1b[201~'
+        received = Path(self.tmp.name, 'paste')
+        program = (
+            'import os, tty, time\n'
+            'tty.setraw(0)\n'
+            'os.write(1, b"\\x1b[?2004h")\n'
+            'data = b""\n'
+            f'while len(data) < {len(payload)}: data += os.read(0, 4096)\n'
+            f'open({str(received)!r}, "wb").write(data)\n'
+            'time.sleep(30)\n'
+        )
+        master, slave = pty.openpty()
+        process = subprocess.Popen(
+            [str(RMUX), 'new', 'paste', '--', 'python3', '-u', '-c', program],
+            env=self.env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+        )
+        os.close(slave)
+        self.clients.append((process, master))
+        output = bytearray()
+        deadline = time.monotonic() + 5
+        while b'\x1b[?2004h' not in output and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                output.extend(os.read(master, 65536))
+        self.assertIn(b'\x1b[?2004h', output)
+        control = self.attach_control('paste')
+        try:
+            while True:
+                kind, snapshot = self.read_frame(control)
+                if kind == BUFFER_SNAPSHOT:
+                    self.assertIn(b'\x1b[?2004h', snapshot[12:])
+                    break
+                self.assertNotEqual(kind, CLOSE)
+        finally:
+            control.close()
+        for chunk in (payload[:3], payload[3:13], payload[13:27], payload[27:]):
+            os.write(master, chunk)
+            time.sleep(0.03)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if received.exists() and received.read_bytes() == payload:
+                break
+            if select.select([master], [], [], 0.1)[0]:
+                os.read(master, 65536)
+        self.assertTrue(received.exists(), 'application did not receive the entire paste')
+        self.assertEqual(received.read_bytes(), payload)
 
     def attach_control(self, name, rows=24, cols=80, resize_step=5):
         sock = socket.socket(socket.AF_UNIX)

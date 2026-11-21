@@ -5,7 +5,6 @@
 - [ ] TODO: Add word editing to buffer rename [rename_word_editing](#rename_word_editing)
 - [ ] TODO: Add configurable per-window borders and gaps [window_borders](#window_borders)
 - [ ] TODO: Investigate OMP crash on resize [omp_resize_crash](#omp_resize_crash)
-- [ ] TODO: Investigate OMP multiline paste submission [omp_paste_submission](#omp_paste_submission)
 
 ## headless_session_input
 
@@ -32,9 +31,7 @@ Add optional individual borders around rmux windows, with configurable character
 
 Reproduce and investigate the reported crash when resizing with OMP running inside rmux. Determine which process crashes and identify the cause; excessive redraw output or an overflow is a hypothesis, not a confirmed diagnosis. Fix the underlying issue and verify that OMP remains usable across resizes.
 
-## omp_paste_submission
-
-When OMP runs inside rmux, pasting multiline text with Ctrl+Shift+V can submit lines as separate messages without pressing Enter, causing the agent to start before receiving the full input. The reported example was a paragraph with a trailing newline. Outside rmux, the same paste remains in the chat input without submission. Reproduce the difference, identify and fix the underlying input-handling issue, and verify that multiline and trailing-newline pastes remain intact without being sent until explicitly submitted.
+The user reported that the crash no longer reproduces after updating rmux from 0.2.0 to 0.4.0. Missing cursor-position replies in 0.2.0 are a suspected cause, but this has not been confirmed.
 
 # DONEs
 
@@ -205,6 +202,7 @@ When OMP runs inside rmux, pasting multiline text with Ctrl+Shift+V can submit l
     - [x] DONE: Test configurable resize step [resize_tests](#resize_tests)
   - [x] DONE: Document user configuration [config_docs](#config_docs)
 - [x] DONE: Configure buffer-line prefixes and suffixes [buffer_line_markers](#buffer_line_markers)
+- [x] DONE: Investigate OMP multiline paste submission [omp_paste_submission](#omp_paste_submission)
 ## rmux
 
 - Role: material
@@ -1294,4 +1292,8 @@ Verify settings reach the client and server, including attachment to an existing
 - Dependency: configuration
 
 Allow independent prefix and suffix characters for buffer names in each buffer-line state: focused, shown in another rmux window, and unshown. Configure them alongside the corresponding colors in ~/.config/rmux/config.toml. Support ASCII and Unicode characters, including Nerd Font glyphs, and account for their terminal display widths. Preserve the current focused-buffer brackets and other existing appearance as defaults.
+
+## omp_paste_submission
+
+When OMP runs inside rmux, pasting multiline text with Ctrl+Shift+V can submit lines as separate messages without pressing Enter, causing the agent to start before receiving the full input. The reported example was a paragraph with a trailing newline. Outside rmux, the same paste remains in the chat input without submission. Reproduce the difference, identify and fix the underlying input-handling issue, and verify that multiline and trailing-newline pastes remain intact without being sent until explicitly submitted.
 
