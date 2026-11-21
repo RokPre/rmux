@@ -1,6 +1,40 @@
 # TODOs
 
+- [ ] TODO: Revisit headless session input when a concrete need arises [headless_session_input](#headless_session_input)
+- [ ] TODO: Add per-window Vim mode matching st [vim_mode](#vim_mode)
+- [ ] TODO: Add word editing to buffer rename [rename_word_editing](#rename_word_editing)
+- [ ] TODO: Add configurable per-window borders and gaps [window_borders](#window_borders)
+- [ ] TODO: Investigate OMP crash on resize [omp_resize_crash](#omp_resize_crash)
+- [ ] TODO: Investigate OMP multiline paste submission [omp_paste_submission](#omp_paste_submission)
 
+## headless_session_input
+
+- Scope: coordinated
+
+Deferred idea only: do not implement now. Revisit if a concrete workflow requires interacting with an existing buffer without an attached terminal. First investigate whether the agent harness or application provides a suitable native interface. Raw terminal input is not an agent API: the receiving program may be busy, may have exited, or may interpret text and Enter differently; if the shell is active, submitted text could execute as a command. It does not confirm that an agent accepted or completed a request. A separate exec operation would start another process, not send a message to an existing agent, and is not justified merely to run shell commands. If a real use case remains, explore target session and buffer selection, input and submission semantics, and feedback before deciding whether to implement.
+
+## vim_mode
+
+Add Vim-style scrollback navigation to the focused rmux window. Match the dotFiles st-meta-vim-full patch as closely as practical: mode entry and exit, Alt-D/F scrolling, motions and counts, smart-case search and highlighting, selection, clipboard yank, and visual feedback. Keep navigation and selection local to each rmux window, even when multiple windows show the same buffer, rather than applying them to the whole terminal. Use the dynamic st keybinding control to disable outer st Vim bindings while rmux is attached and restore the previous state on exit. Compare the same scenarios in plain st and rmux, and document intentional differences.
+
+## rename_word_editing
+
+In the buffer rename prompt, make Ctrl-Backspace delete the preceding word without leaving rename mode. Support Ctrl-Left and Ctrl-Right to move the cursor between words while editing the name.
+
+## window_borders
+
+- Scope: coordinated
+- Dependency: configuration
+
+Add optional individual borders around rmux windows, with configurable characters and distinct focused and unfocused colors, plus configurable gaps between adjacent borders or dividers. Preserve the existing single-divider layout as the default. Ensure borders and gaps are reflected consistently in rendering and shared buffer sizing, including small windows and multiple differently sized clients. Revisit and update border configuration when the implementation is designed.
+
+## omp_resize_crash
+
+Reproduce and investigate the reported crash when resizing with OMP running inside rmux. Determine which process crashes and identify the cause; excessive redraw output or an overflow is a hypothesis, not a confirmed diagnosis. Fix the underlying issue and verify that OMP remains usable across resizes.
+
+## omp_paste_submission
+
+When OMP runs inside rmux, pasting multiline text with Ctrl+Shift+V can submit lines as separate messages without pressing Enter, causing the agent to start before receiving the full input. The reported example was a paragraph with a trailing newline. Outside rmux, the same paste remains in the chat input without submission. Reproduce the difference, identify and fix the underlying input-handling issue, and verify that multiline and trailing-newline pastes remain intact without being sent until explicitly submitted.
 
 # DONEs
 
@@ -141,6 +175,36 @@
 
 - [x] DONE: Add --version and -v flags [version_flags](#version_flags)
 
+- [x] DONE: Add user configuration for rmux [configuration](#configuration)
+  - [x] DONE: Load TOML configuration with defaults [config_loading](#config_loading)
+    - [x] DONE: Define configuration types and defaults [config_schema](#config_schema)
+    - [x] DONE: Locate the configuration file [config_path](#config_path)
+    - [x] DONE: Read the configuration file [config_read](#config_read)
+    - [x] DONE: Parse TOML into configuration [config_parse](#config_parse)
+    - [x] DONE: Validate configuration values [config_validate](#config_validate)
+    - [x] DONE: Test configuration loading and errors [config_load_tests](#config_load_tests)
+    - [x] DONE: Load configuration when rmux starts [config_startup](#config_startup)
+    - [x] DONE: Test configuration across session startup and attachment [config_start_tests](#config_start_tests)
+  - [x] DONE: Configure rmux keybindings [config_keys](#config_keys)
+    - [x] DONE: Define keybinding syntax [keys_syntax](#keys_syntax)
+    - [x] DONE: Parse configured keybindings [keys_parse](#keys_parse)
+    - [x] DONE: Apply configured keybindings [keys_apply](#keys_apply)
+    - [x] DONE: Test configurable keybindings [keys_tests](#keys_tests)
+  - [x] DONE: Configure buffer-line colors [config_buffer_colors](#config_buffer_colors)
+    - [x] DONE: Identify buffer visibility states [buffer_color_states](#buffer_color_states)
+    - [x] DONE: Render configured buffer-line colors [buffer_color_render](#buffer_color_render)
+    - [x] DONE: Test buffer-line colors [buffer_color_tests](#buffer_color_tests)
+  - [x] DONE: Configure existing window dividers [config_dividers](#config_dividers)
+    - [x] DONE: Render configured divider styles [divider_style](#divider_style)
+    - [x] DONE: Test divider styles [divider_tests](#divider_tests)
+  - [x] DONE: Configure unused-space fill [config_margin](#config_margin)
+    - [x] DONE: Render configured margin fill [margin_style](#margin_style)
+    - [x] DONE: Test margin fill [margin_tests](#margin_tests)
+  - [x] DONE: Configure window resize step [config_resize](#config_resize)
+    - [x] DONE: Apply configured window resize step [resize_apply](#resize_apply)
+    - [x] DONE: Test configurable resize step [resize_tests](#resize_tests)
+  - [x] DONE: Document user configuration [config_docs](#config_docs)
+- [x] DONE: Configure buffer-line prefixes and suffixes [buffer_line_markers](#buffer_line_markers)
 ## rmux
 
 - Role: material
@@ -433,13 +497,11 @@ Investigate the current implementation, existing terminal technology and st inpu
 
 - Role: atomic
 
-
 The Bash CLI currently supports new, up, attach, ls and kill with --cwd and command forwarding. Tests cover session lifecycle, attach/detach, concurrent up and guarded process-tree kill. The i3 and OMP launchers rely on named sessions, checkout-specific cwd, four-hex additional-session suffixes, and the OMP custom-resume command; preserve these contracts during migration.
 
 ## assess_engines
 
 - Role: atomic
-
 
 Use a Rust session server/client with one PTY and vt100 terminal screen per buffer, a shared server-owned layout/focus model, and independently rendered attached clients. portable-pty provides PTYs and vt100 parses terminal streams into screen state; this directly models buffers referenced by multiple windows. tmux provides mature sessions and panes but its pane/window model does not directly allow one live buffer to appear in multiple layout cells, so using it unchanged would violate the contract.
 
@@ -447,13 +509,11 @@ Use a Rust session server/client with one PTY and vt100 terminal screen per buff
 
 - Role: atomic
 
-
 dtach remains suitable only for the current one-command attach/detach session. Its one socket and one terminal stream do not provide independent PTYs/screens, shared split layout/focus, or the required minimum size across multiple views. Replace it as the interactive runtime rather than layering window behavior on the existing socket.
 
 ## inspect_st_keys
 
 - Role: atomic
-
 
 The checked-out and installed st binaries match. st maps Ctrl-Shift-H/L to CSI-u sequences; ordinary Ctrl letters are emitted as control bytes, so Ctrl-T/W/H/L need explicit distinct CSI-u mappings. Alt-letter combinations are emitted with an ESC prefix. The inspected i3 keybindings use Super-modified Alt or Ctrl combinations, not the proposed bare Alt controls. Verify end-to-end key delivery through live st/i3 during acceptance.
 
@@ -496,30 +556,25 @@ Preserve name handling, creation command and working directory semantics, and sa
 - Role: atomic
 - Dependency: architecture
 
-
 ## client_attach
 
 - Role: atomic
 - Dependency: architecture
-
 
 ## client_detach
 
 - Role: atomic
 - Dependency: architecture
 
-
 ## attachment_tracking
 
 - Role: atomic
 - Dependency: architecture
 
-
 ## session_cleanup
 
 - Role: atomic
 - Dependency: architecture
-
 
 ## launcher_migration
 
@@ -543,42 +598,35 @@ Manage running terminal programs independently of their display windows. Scope i
 - Role: atomic
 - Dependency: architecture & session_runtime
 
-
 ## terminal_state
 
 - Role: atomic
 - Dependency: architecture & session_runtime
-
 
 ## hidden_buffer
 
 - Role: atomic
 - Dependency: architecture & session_runtime
 
-
 ## buffer_order
 
 - Role: atomic
 - Dependency: architecture & session_runtime
-
 
 ## buffer_close
 
 - Role: atomic
 - Dependency: architecture & session_runtime
 
-
 ## buffer_exit
 
 - Role: atomic
 - Dependency: architecture & session_runtime
 
-
 ## final_buffer
 
 - Role: atomic
 - Dependency: architecture & session_runtime
-
 
 ## interface_stage
 
@@ -605,66 +653,55 @@ Represent the split layout and focused rmux window once per session. A window di
 - Role: atomic
 - Dependency: buffer_runtime
 
-
 ## vertical_split
 
 - Role: atomic
 - Dependency: buffer_runtime
-
 
 ## horizontal_split
 
 - Role: atomic
 - Dependency: buffer_runtime
 
-
 ## close_window
 
 - Role: atomic
 - Dependency: buffer_runtime
-
 
 ## last_window
 
 - Role: atomic
 - Dependency: buffer_runtime
 
-
 ## focus_window
 
 - Role: atomic
 - Dependency: buffer_runtime
-
 
 ## move_window
 
 - Role: atomic
 - Dependency: buffer_runtime
 
-
 ## resize_window
 
 - Role: atomic
 - Dependency: buffer_runtime
-
 
 ## switch_buffer
 
 - Role: atomic
 - Dependency: buffer_runtime
 
-
 ## reorder_buffer
 
 - Role: atomic
 - Dependency: buffer_runtime
 
-
 ## new_buffer_view
 
 - Role: atomic
 - Dependency: buffer_runtime
-
 
 ## closed_buffer_views
 
@@ -688,48 +725,40 @@ Draw the shared layout, buffer line and terminal states in each attached termina
 - Role: atomic
 - Dependency: buffer_runtime & window_layout & session_runtime
 
-
 ## buffer_line
 
 - Role: atomic
 - Dependency: buffer_runtime & window_layout & session_runtime
-
 
 ## buffer_geometry
 
 - Role: atomic
 - Dependency: buffer_runtime & window_layout & session_runtime
 
-
 ## notify_resize
 
 - Role: atomic
 - Dependency: buffer_runtime & window_layout & session_runtime
-
 
 ## centered_view
 
 - Role: atomic
 - Dependency: buffer_runtime & window_layout & session_runtime
 
-
 ## background_pattern
 
 - Role: atomic
 - Dependency: buffer_runtime & window_layout & session_runtime
-
 
 ## geometry_updates
 
 - Role: atomic
 - Dependency: buffer_runtime & window_layout & session_runtime
 
-
 ## shared_redraw
 
 - Role: atomic
 - Dependency: buffer_runtime & window_layout & session_runtime
-
 
 ## input_controls
 
@@ -746,54 +775,45 @@ Translate the agreed shortcuts into shared session actions while allowing termin
 - Role: atomic
 - Dependency: architecture & buffer_runtime & window_layout
 
-
 ## buffer_keys
 
 - Role: atomic
 - Dependency: architecture & buffer_runtime & window_layout
-
 
 ## buffer_navigation_keys
 
 - Role: atomic
 - Dependency: architecture & buffer_runtime & window_layout
 
-
 ## buffer_move_keys
 
 - Role: atomic
 - Dependency: architecture & buffer_runtime & window_layout
-
 
 ## window_split_keys
 
 - Role: atomic
 - Dependency: architecture & buffer_runtime & window_layout
 
-
 ## window_close_key
 
 - Role: atomic
 - Dependency: architecture & buffer_runtime & window_layout
-
 
 ## window_focus_keys
 
 - Role: atomic
 - Dependency: architecture & buffer_runtime & window_layout
 
-
 ## window_move_keys
 
 - Role: atomic
 - Dependency: architecture & buffer_runtime & window_layout
 
-
 ## window_size_keys
 
 - Role: atomic
 - Dependency: architecture & buffer_runtime & window_layout
-
 
 ## st_integration
 
@@ -827,90 +847,75 @@ Automated runtime checks pass, and the user confirmed Alt-V and Alt-B in st with
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
-
 ## verify_launchers
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
-
 
 ## verify_detach
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
-
 ## verify_hidden
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
-
 
 ## verify_splits
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
-
 ## verify_independent_switch
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
-
 
 ## verify_window_close
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
-
 ## verify_buffer_close
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
-
 
 ## verify_buffer_line
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
-
 ## verify_window_controls
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
-
 
 ## verify_shared_clients
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
-
 ## verify_shared_size
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
-
 
 ## verify_centering
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
-
 ## verify_resize_events
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
 
-
 ## verify_keys
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls & verify_st_patch
-
 
 The user verified the real Super+Ctrl+T i3 launcher and two attachments to one session. They tested window splits, focus, movement, resizing, buffer navigation, reordering and renaming, Alt+= equalization, final-window protection, final-buffer session termination, and reattachment after closing both terminal windows. Ctrl-Shift-H/L, Alt-H/J/K/L, Alt-Shift-H/J/K/L, and Alt-Ctrl-H/J/K/L were confirmed individually. Automated PTY and lifecycle tests cover ordinary input and shared sessions.
 
@@ -918,7 +923,6 @@ The user verified the real Super+Ctrl+T i3 launcher and two attachments to one s
 
 - Role: atomic
 - Dependency: session_runtime & buffer_runtime & window_layout & presentation & input_controls
-
 
 ## usage_docs
 
@@ -935,12 +939,10 @@ Document the delivered session, buffer and rmux window model, controls, lifetime
 - Role: atomic
 - Dependency: verification
 
-
 ## document_controls
 
 - Role: atomic
 - Dependency: verification & buffer_rename & equalize_windows
-
 
 Document all supported keyboard controls and application conflicts, including Ctrl-R buffer renaming and Alt+= window equalization after those features are implemented. State any verified physical-key fallback required by st.
 
@@ -949,12 +951,10 @@ Document all supported keyboard controls and application conflicts, including Ct
 - Role: atomic
 - Dependency: verification
 
-
 ## document_views
 
 - Role: atomic
 - Dependency: verification
-
 
 ## verify_st_patch
 
@@ -1059,3 +1059,239 @@ The user reported that the first uncolored text appeared gray after the buffer l
 ## version_flags
 
 Implement --version and -v so either flag prints the installed rmux version. Use Semantic Versioning (https://semver.org/): increment MAJOR for incompatible changes, MINOR for backward-compatible functionality, and PATCH for backward-compatible bug fixes. During initial development (0.y.z), the public interface is not considered stable.
+
+## configuration
+
+- Scope: coordinated
+- Children: config_loading & config_keys & config_buffer_colors & config_dividers & config_margin & config_resize & config_docs
+- Difficulty: 4 kyu
+- Uncertainty: high
+- Role: material
+
+Add user configuration in ~/.config/rmux/config.toml, retaining current behavior when settings are omitted. Cover existing rmux keybindings, buffer-line colors, current single-divider characters and colors, unused-space fill and color, and window resize step. Keep configuration for future per-window borders best effort: the border design may change when window_borders is implemented. Buffer-line markers are tracked by buffer_line_markers; Vim-mode configuration belongs with vim_mode when implemented. Define exact syntax and error behavior during implementation.
+
+Grouped plan:
+- Material: develop the complete configuration feature in a worktree.
+- Composite 1: configuration and controls. Review the TOML loading and defaults as one molecule, then keybindings and resize-step behavior as a second molecule; commit them together.
+- Composite 2: configuration appearance and documentation. Review buffer-line colors as one molecule, divider and unused-space styling as a second molecule, and the documentation after those settings work; commit them together.
+- Keep the feature groups and their atomic steps as the completion checklist. The grouped plan can change as implementation reveals better boundaries.
+
+Load configuration at startup or attachment. Hot reload is outside the scope of this task and will not be implemented.
+
+## config_loading
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 6 kyu
+- Children: config_schema & config_path & config_read & config_parse & config_validate & config_load_tests & config_startup & config_start_tests
+
+Load ~/.config/rmux/config.toml and apply existing defaults for omitted settings; report invalid configuration clearly.
+
+## config_keys
+
+- Role: molecule
+- Dependency: config_loading
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: keys_syntax & keys_parse & keys_apply & keys_tests
+
+Apply configured shortcuts to every existing rmux command and retain the existing defaults for omitted bindings.
+
+## config_buffer_colors
+
+- Role: molecule
+- Dependency: config_loading
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Children: buffer_color_states & buffer_color_render & buffer_color_tests
+
+Configure the line background and foreground and background colors for focused, shown-but-not-focused, and unshown buffers.
+
+## config_dividers
+
+- Role: molecule
+- Dependency: config_loading
+- Scope: local
+- Difficulty: 6 kyu
+- Children: divider_style & divider_tests
+
+Configure the characters and color of the existing single dividers, preserving their current appearance by default; future border settings are best effort.
+
+## config_margin
+
+- Role: molecule
+- Dependency: config_loading
+- Scope: local
+- Difficulty: 6 kyu
+- Children: margin_style & margin_tests
+
+Configure the fill and color around buffer views smaller than their windows.
+
+## config_resize
+
+- Role: molecule
+- Dependency: config_loading
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Children: resize_apply & resize_tests
+
+Apply a configured resize step to window resizing while retaining the current default.
+
+## config_docs
+
+- Role: atomic
+- Dependency: config_keys & config_buffer_colors & config_dividers & config_margin & config_resize
+
+Document the supported TOML settings, defaults, and keybinding syntax after the behavior works.
+
+## config_schema
+
+- Role: atomic
+
+Represent supported TOML settings with defaults matching existing behavior.
+
+## config_path
+
+- Role: atomic
+
+Resolve the agreed ~/.config/rmux/config.toml path without requiring the file to exist.
+
+## config_read
+
+- Role: atomic
+- Dependency: config_path
+
+Read the file when present and report file access errors.
+
+## config_parse
+
+- Role: atomic
+- Dependency: config_schema & config_read
+
+Parse the file into the configuration types and report malformed TOML.
+
+## config_validate
+
+- Role: atomic
+- Dependency: config_parse
+
+Reject invalid settings with actionable errors while retaining defaults for omitted values.
+
+## config_load_tests
+
+- Role: atomic
+- Dependency: config_validate
+
+Cover missing and partial files, valid TOML, malformed TOML, invalid settings, and read errors.
+
+## keys_syntax
+
+- Role: atomic
+- Dependency: config_loading
+
+Choose a readable representation for existing commands and terminal key sequences, including conflicting bindings.
+
+## keys_parse
+
+- Role: atomic
+- Dependency: keys_syntax
+
+Convert configured keys to input sequences and reject invalid or conflicting bindings.
+
+## keys_apply
+
+- Role: atomic
+- Dependency: keys_parse
+
+Use configured bindings for existing commands while keeping omitted bindings at their defaults.
+
+## keys_tests
+
+- Role: atomic
+- Dependency: keys_apply
+
+Verify remapping, defaults, conflicts, and ordinary input passthrough through the client.
+
+## buffer_color_states
+
+- Role: atomic
+- Dependency: config_loading
+
+Distinguish focused, shown-but-not-focused, and unshown buffers in the buffer line.
+
+## buffer_color_render
+
+- Role: atomic
+- Dependency: buffer_color_states
+
+Apply the configured background and each state foreground and background.
+
+## buffer_color_tests
+
+- Role: atomic
+- Dependency: buffer_color_render
+
+Verify state-specific colors and defaults with multiple visible and hidden buffers.
+
+## divider_style
+
+- Role: atomic
+- Dependency: config_loading
+
+Apply configured characters and color to existing horizontal and vertical dividers without changing default geometry.
+
+## divider_tests
+
+- Role: atomic
+- Dependency: divider_style
+
+Verify custom divider appearance and existing defaults.
+
+## margin_style
+
+- Role: atomic
+- Dependency: config_loading
+
+Apply the configured fill and color to unused space around smaller buffer views.
+
+## margin_tests
+
+- Role: atomic
+- Dependency: margin_style
+
+Verify custom and default fill in differently sized views of the same buffer.
+
+## resize_apply
+
+- Role: atomic
+- Dependency: config_loading
+
+Use the configured step for window resizing while retaining the current default.
+
+## resize_tests
+
+- Role: atomic
+- Dependency: resize_apply
+
+Verify configured and default resize steps and boundary behavior.
+
+## config_startup
+
+- Role: atomic
+- Dependency: config_validate
+
+Integrate configuration loading into client and session-server startup and provide the resulting settings to their consumers. Define which settings belong to an attachment and which belong to a session.
+
+## config_start_tests
+
+- Role: atomic
+- Dependency: config_startup
+
+Verify settings reach the client and server, including attachment to an existing session and changes to the configuration between launches.
+
+## buffer_line_markers
+
+- Dependency: configuration
+
+Allow independent prefix and suffix characters for buffer names in each buffer-line state: focused, shown in another rmux window, and unshown. Configure them alongside the corresponding colors in ~/.config/rmux/config.toml. Support ASCII and Unicode characters, including Nerd Font glyphs, and account for their terminal display widths. Preserve the current focused-buffer brackets and other existing appearance as defaults.
+
