@@ -191,8 +191,8 @@ impl WindowLayout {
         swap_windows(&mut self.tree, self.focused_window, *target_id)
     }
 
-    pub(crate) fn resize_focused_window(&mut self, direction: Direction) -> bool {
-        resize(&mut self.tree, self.focused_window, direction).unwrap_or(false)
+    pub(crate) fn resize_focused_window(&mut self, direction: Direction, step: u8) -> bool {
+        resize(&mut self.tree, self.focused_window, direction, step).unwrap_or(false)
     }
 
     pub(crate) fn equalize(&mut self) -> bool {
@@ -557,7 +557,7 @@ fn fill_window(node: &mut WindowNode, marker: u64, id: u64, buffer: u64) -> bool
     }
 }
 
-fn resize(node: &mut WindowNode, focused: u64, direction: Direction) -> Option<bool> {
+fn resize(node: &mut WindowNode, focused: u64, direction: Direction, step: u8) -> Option<bool> {
     match node {
         WindowNode::Window { .. } => None,
         WindowNode::Split {
@@ -572,9 +572,9 @@ fn resize(node: &mut WindowNode, focused: u64, direction: Direction) -> Option<b
                 return None;
             }
             let child_result = if in_first {
-                resize(first, focused, direction)
+                resize(first, focused, direction, step)
             } else {
-                resize(second, focused, direction)
+                resize(second, focused, direction, step)
             };
             if child_result.is_some() {
                 return child_result;
@@ -588,9 +588,9 @@ fn resize(node: &mut WindowNode, focused: u64, direction: Direction) -> Option<b
             }
             // Move the split boundary in the requested direction.
             if matches!(direction, Direction::Right | Direction::Down) {
-                *ratio = (*ratio).saturating_add(5).min(99);
+                *ratio = (*ratio).saturating_add(step).min(99);
             } else {
-                *ratio = (*ratio).saturating_sub(5).max(1);
+                *ratio = (*ratio).saturating_sub(step).max(1);
             }
             Some(true)
         }
@@ -825,7 +825,7 @@ mod geometry_tests {
             next_window: 3,
         };
 
-        assert!(layout.resize_focused_window(super::Direction::Left));
+        assert!(layout.resize_focused_window(super::Direction::Left, 5));
 
         let snapshot: serde_json::Value =
             serde_json::from_slice(&layout.snapshot(&[1], &HashMap::from([(1, "1".to_owned())])))

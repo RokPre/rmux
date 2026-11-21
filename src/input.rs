@@ -21,57 +21,132 @@ pub(crate) enum InputAction {
 }
 
 struct Binding {
-    sequence: &'static [u8],
+    sequence: Vec<u8>,
     command: InputCommand,
 }
 
-const BINDINGS: &[Binding] = &[
-    binding(b"\x08", PREVIOUS_BUFFER, b""),
-    binding(b"\x0c", NEXT_BUFFER, b""),
-    binding(b"\x12", RENAME_BUFFER, b""),
-    binding(b"\x14", NEW_BUFFER, b""),
-    binding(b"\x17", CLOSE_BUFFER, b""),
-    binding(b"\x1b[104;6u", REORDER_BUFFER_LEFT, b""),
-    binding(b"\x1b[108;6u", REORDER_BUFFER_RIGHT, b""),
-    binding(b"\x1b\x08", RESIZE_WINDOW, b"h"),
-    binding(b"\x1b\n", RESIZE_WINDOW, b"j"),
-    binding(b"\x1b\x0b", RESIZE_WINDOW, b"k"),
-    binding(b"\x1b\x0c", RESIZE_WINDOW, b"l"),
-    binding(b"\x1bH", MOVE_WINDOW, b"h"),
-    binding(b"\x1bJ", MOVE_WINDOW, b"j"),
-    binding(b"\x1bK", MOVE_WINDOW, b"k"),
-    binding(b"\x1bL", MOVE_WINDOW, b"l"),
-    binding(b"\x1bh", FOCUS_WINDOW, b"h"),
-    binding(b"\x1bj", FOCUS_WINDOW, b"j"),
-    binding(b"\x1bk", FOCUS_WINDOW, b"k"),
-    binding(b"\x1bl", FOCUS_WINDOW, b"l"),
-    binding(b"\x1bv", SPLIT_VERTICAL, b""),
-    binding(b"\x1bb", SPLIT_HORIZONTAL, b""),
-    binding(b"\x1bw", CLOSE_WINDOW, b""),
-    binding(b"\x1b=", EQUALIZE_WINDOWS, b""),
+const BINDINGS: &[(&[u8], u8, &[u8])] = &[
+    (b"\x08", PREVIOUS_BUFFER, b""),
+    (b"\x0c", NEXT_BUFFER, b""),
+    (b"\x12", RENAME_BUFFER, b""),
+    (b"\x14", NEW_BUFFER, b""),
+    (b"\x17", CLOSE_BUFFER, b""),
+    (b"\x1b[104;6u", REORDER_BUFFER_LEFT, b""),
+    (b"\x1b[108;6u", REORDER_BUFFER_RIGHT, b""),
+    (b"\x1b\x08", RESIZE_WINDOW, b"h"),
+    (b"\x1b\n", RESIZE_WINDOW, b"j"),
+    (b"\x1b\x0b", RESIZE_WINDOW, b"k"),
+    (b"\x1b\x0c", RESIZE_WINDOW, b"l"),
+    (b"\x1bH", MOVE_WINDOW, b"h"),
+    (b"\x1bJ", MOVE_WINDOW, b"j"),
+    (b"\x1bK", MOVE_WINDOW, b"k"),
+    (b"\x1bL", MOVE_WINDOW, b"l"),
+    (b"\x1bh", FOCUS_WINDOW, b"h"),
+    (b"\x1bj", FOCUS_WINDOW, b"j"),
+    (b"\x1bk", FOCUS_WINDOW, b"k"),
+    (b"\x1bl", FOCUS_WINDOW, b"l"),
+    (b"\x1bv", SPLIT_VERTICAL, b""),
+    (b"\x1bb", SPLIT_HORIZONTAL, b""),
+    (b"\x1bw", CLOSE_WINDOW, b""),
+    (b"\x1b=", EQUALIZE_WINDOWS, b""),
 ];
 
-const fn binding(sequence: &'static [u8], kind: u8, payload: &'static [u8]) -> Binding {
+fn configured_bindings(config: &crate::config::Config) -> Vec<Binding> {
+    let mut bindings: Vec<Binding> = BINDINGS
+        .iter()
+        .map(|(sequence, kind, payload)| Binding {
+            sequence: sequence.to_vec(),
+            command: InputCommand {
+                kind: *kind,
+                payload,
+            },
+        })
+        .collect();
+    for (action, key) in &config.bindings {
+        let Some((kind, payload)) = action_command(action) else {
+            continue;
+        };
+        let Some(sequence) = crate::config::parse_key(key) else {
+            continue;
+        };
+        bindings
+            .retain(|binding| binding.command.kind != kind || binding.command.payload != payload);
+        bindings.retain(|binding| binding.sequence != sequence);
+        bindings.push(Binding {
+            sequence,
+            command: InputCommand { kind, payload },
+        });
+    }
+    bindings
+}
+
+fn action_command(action: &str) -> Option<(u8, &'static [u8])> {
+    Some(match action {
+        "previous_buffer" => (PREVIOUS_BUFFER, b""),
+        "next_buffer" => (NEXT_BUFFER, b""),
+        "rename_buffer" => (RENAME_BUFFER, b""),
+        "new_buffer" => (NEW_BUFFER, b""),
+        "close_buffer" => (CLOSE_BUFFER, b""),
+        "reorder_buffer_left" => (REORDER_BUFFER_LEFT, b""),
+        "reorder_buffer_right" => (REORDER_BUFFER_RIGHT, b""),
+        "resize_left" => (RESIZE_WINDOW, b"h"),
+        "resize_down" => (RESIZE_WINDOW, b"j"),
+        "resize_up" => (RESIZE_WINDOW, b"k"),
+        "resize_right" => (RESIZE_WINDOW, b"l"),
+        "move_left" => (MOVE_WINDOW, b"h"),
+        "move_down" => (MOVE_WINDOW, b"j"),
+        "move_up" => (MOVE_WINDOW, b"k"),
+        "move_right" => (MOVE_WINDOW, b"l"),
+        "focus_left" => (FOCUS_WINDOW, b"h"),
+        "focus_down" => (FOCUS_WINDOW, b"j"),
+        "focus_up" => (FOCUS_WINDOW, b"k"),
+        "focus_right" => (FOCUS_WINDOW, b"l"),
+        "split_vertical" => (SPLIT_VERTICAL, b""),
+        "split_horizontal" => (SPLIT_HORIZONTAL, b""),
+        "close_window" => (CLOSE_WINDOW, b""),
+        "equalize" => (EQUALIZE_WINDOWS, b""),
+        _ => return None,
+    })
+}
+
+fn binding(sequence: &'static [u8], kind: u8, payload: &'static [u8]) -> Binding {
     Binding {
-        sequence,
+        sequence: sequence.to_vec(),
         command: InputCommand { kind, payload },
     }
 }
 
-#[derive(Default)]
 pub(crate) struct InputDecoder {
     pending: Vec<u8>,
     last_input: Option<Instant>,
+    bindings: Vec<Binding>,
+}
+
+impl Default for InputDecoder {
+    fn default() -> Self {
+        Self {
+            pending: Vec::new(),
+            last_input: None,
+            bindings: BINDINGS.iter().map(|(s, k, p)| binding(s, *k, p)).collect(),
+        }
+    }
 }
 
 impl InputDecoder {
+    pub(crate) fn configured(config: &crate::config::Config) -> Self {
+        Self {
+            pending: Vec::new(),
+            last_input: None,
+            bindings: configured_bindings(config),
+        }
+    }
     pub fn is_idle(&self) -> bool {
         self.pending.is_empty()
     }
     pub fn should_decode(&self, bytes: &[u8]) -> bool {
         !self.is_idle()
             || bytes.iter().any(|byte| {
-                BINDINGS
+                self.bindings
                     .iter()
                     .any(|binding| binding.sequence.first() == Some(byte))
             })
@@ -92,7 +167,8 @@ impl InputDecoder {
 
         for &byte in bytes {
             if self.pending.is_empty() && byte != b'\x1b' {
-                if let Some(binding) = BINDINGS
+                if let Some(binding) = self
+                    .bindings
                     .iter()
                     .find(|binding| binding.sequence.len() == 1 && binding.sequence[0] == byte)
                 {
@@ -107,7 +183,8 @@ impl InputDecoder {
             self.pending.push(byte);
             self.last_input = Some(now);
             loop {
-                if let Some(binding) = BINDINGS
+                if let Some(binding) = self
+                    .bindings
                     .iter()
                     .find(|binding| binding.sequence == self.pending)
                 {
@@ -117,7 +194,8 @@ impl InputDecoder {
                     self.last_input = None;
                     break;
                 }
-                if BINDINGS
+                if self
+                    .bindings
                     .iter()
                     .any(|binding| binding.sequence.starts_with(&self.pending))
                 {
@@ -287,5 +365,41 @@ mod tests {
             Some(InputAction::Bytes(b"\x1b[104;".to_vec()))
         );
         assert!(decoder.is_idle());
+    }
+
+    #[test]
+    fn configured_binding_replaces_only_its_old_sequence() {
+        let mut config = crate::config::Config::default();
+        config.bindings.insert("new_buffer".into(), "ctrl+g".into());
+        let mut decoder = InputDecoder::configured(&config);
+        assert_eq!(
+            decoder.feed(b"\x07"),
+            vec![InputAction::Command(InputCommand {
+                kind: NEW_BUFFER,
+                payload: b""
+            })]
+        );
+        assert_eq!(
+            decoder.feed(b"\x14"),
+            vec![InputAction::Bytes(b"\x14".to_vec())]
+        );
+    }
+
+    #[test]
+    fn configured_escape_bindings_survive_split_reads() {
+        let mut config = crate::config::Config::default();
+        config
+            .bindings
+            .insert("split_vertical".into(), "alt+q".into());
+        let mut decoder = InputDecoder::configured(&config);
+        let now = Instant::now();
+        assert!(decoder.feed_at(b"\x1b", now).is_empty());
+        assert_eq!(
+            decoder.feed_at(b"q", now + Duration::from_millis(1)),
+            vec![InputAction::Command(InputCommand {
+                kind: SPLIT_VERTICAL,
+                payload: b""
+            })]
+        );
     }
 }

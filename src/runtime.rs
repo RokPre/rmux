@@ -104,6 +104,7 @@ impl SessionPaths {
                 name: name.into(),
                 rows: 0,
                 cols: 0,
+                resize_step: 5,
             },
         )?;
         reader.get_mut().write_all(b"\n")?;
@@ -181,6 +182,7 @@ impl SessionPaths {
                     name: name.into(),
                     rows: 0,
                     cols: 0,
+                    resize_step: 5,
                 },
             )?;
             read_response(&mut stream).map_err(|error| {
@@ -226,6 +228,7 @@ impl SessionPaths {
                 name: name.into(),
                 rows: 0,
                 cols: 0,
+                resize_step: 5,
             },
         )?;
         let response = read_response(&mut stream).map_err(|error| {

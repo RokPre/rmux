@@ -35,7 +35,11 @@ RENAME_BUFFER = 16
 class Sessions(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='rmux-')
-        self.env = dict(os.environ, XDG_RUNTIME_DIR=self.tmp.name, TERM='xterm')
+        self.config_dir = Path(self.tmp.name, 'config')
+        self.config_dir.mkdir()
+        self.env = dict(os.environ, XDG_RUNTIME_DIR=self.tmp.name,
+                        XDG_CONFIG_HOME=str(self.config_dir), HOME=self.tmp.name,
+                        TERM='xterm')
         self.clients = []
 
     def tearDown(self):
@@ -57,6 +61,35 @@ class Sessions(unittest.TestCase):
         return subprocess.run([str(RMUX), *args], env=self.env, text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
 
+    def test_invalid_config_fails_before_session_start(self):
+        config = self.config_dir / 'rmux' / 'config.toml'
+        config.parent.mkdir()
+        config.write_text('[resize]\nstep_percent = 0\n')
+        result = self.run_rmux('new', 'invalid')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('resize.step_percent', result.stderr)
+        self.assertEqual(self.run_rmux('ls').stdout, '')
+
+    def test_custom_binding_works_when_attaching_to_new_session(self):
+        config = self.config_dir / 'rmux' / 'config.toml'
+        config.parent.mkdir()
+        config.write_text('[bindings]\nnew_buffer = "ctrl+g"\n')
+        process, terminal = self.start('new', 'custom-binding', '--', '/bin/sh', '-c', 'sleep 30')
+        self.addCleanup(lambda: os.write(terminal, b'\x03') if process.poll() is None else None)
+        deadline = time.monotonic() + 5
+        while process.poll() is None and time.monotonic() < deadline:
+            try:
+                os.write(terminal, b'\x07')
+                time.sleep(0.1)
+                control = self.attach_control('custom-binding')
+                layout = self.read_layout(control)
+                control.close()
+                self.assertGreaterEqual(len(layout['buffers']), 2)
+                return
+            except (AssertionError, OSError, socket.timeout, EOFError):
+                continue
+        self.fail('custom Ctrl-G binding did not create a second buffer')
+
     def drain_terminal_output(self, fd):
         while True:
             try:
@@ -77,12 +110,13 @@ class Sessions(unittest.TestCase):
         ).start()
         return process, master
 
-    def attach_control(self, name, rows=24, cols=80):
+    def attach_control(self, name, rows=24, cols=80, resize_step=5):
         sock = socket.socket(socket.AF_UNIX)
         sock.settimeout(8)
         sock.connect(str(Path(self.tmp.name, 'rmux-v2', 'sessions', f'{name}.sock')))
         request = json.dumps({
             'op': 'attach', 'name': name, 'rows': rows, 'cols': cols,
+            'resize_step': resize_step,
         }).encode() + b'\n'
         sock.sendall(request)
         response = bytearray()
@@ -408,7 +442,7 @@ class Sessions(unittest.TestCase):
         self.start('new', 'windows', '--', 'sh', '-i')
         self.wait_for(lambda: self.run_rmux('ls').stdout == 'windows\n')
         first = self.attach_control('windows')
-        second = self.attach_control('windows')
+        second = self.attach_control('windows', resize_step=12)
         last = None
         try:
             initial = self.read_layout(first)
@@ -475,7 +509,7 @@ class Sessions(unittest.TestCase):
             self.send_frame(second, RESIZE_WINDOW, b'l')
             resized = self.read_layout(first)
             self.assertEqual(resized, self.read_layout(second))
-            self.assertEqual(resized['tree']['ratio'], 55)
+            self.assertEqual(resized['tree']['ratio'], 62)
 
             self.send_frame(first, CLOSE_WINDOW)
             closed = self.read_layout(first)

@@ -14,14 +14,28 @@ use crate::layout::{Divider, LayoutGeometry, LayoutSnapshot, PaneRect};
 pub(crate) const BUFFER_SNAPSHOT: u8 = 4;
 pub(crate) const BUFFER_OUTPUT: u8 = 5;
 
-#[derive(Default)]
 pub(crate) struct Renderer {
     snapshot: Option<LayoutSnapshot>,
     parsers: HashMap<u64, Parser>,
     prompt: Option<String>,
+    config: crate::config::Config,
+}
+
+impl Default for Renderer {
+    fn default() -> Self {
+        Self::with_config(crate::config::Config::default())
+    }
 }
 
 impl Renderer {
+    pub(crate) fn with_config(config: crate::config::Config) -> Self {
+        Self {
+            snapshot: None,
+            parsers: HashMap::new(),
+            prompt: None,
+            config,
+        }
+    }
     pub(crate) fn apply_frame(&mut self, kind: u8, payload: &[u8]) -> io::Result<()> {
         match kind {
             BUFFER_SNAPSHOT => {
@@ -90,15 +104,20 @@ impl Renderer {
         queue!(output, Hide)?;
         if rows >= 3 {
             if let Some(prompt) = self.prompt.as_ref() {
-                draw_header_line(output, prompt, cols)?;
+                draw_header_line(output, prompt, cols, &self.config)?;
             } else {
-                draw_buffer_line(output, snapshot, cols)?;
+                draw_buffer_line(output, snapshot, cols, &geometry, &self.config)?;
             }
         }
         for placement in &geometry.windows {
-            draw_pane(output, placement.rect, self.parsers.get(&placement.buffer))?;
+            draw_pane(
+                output,
+                placement.rect,
+                self.parsers.get(&placement.buffer),
+                &self.config,
+            )?;
         }
-        draw_dividers(output, &geometry)?;
+        draw_dividers(output, &geometry, &self.config)?;
         if let Some(prompt) = self.prompt.as_ref() {
             if rows >= 3 && cols > 0 {
                 let cursor_col = UnicodeWidthStr::width(prompt.as_str())
@@ -130,34 +149,177 @@ fn draw_buffer_line(
     output: &mut impl Write,
     snapshot: &LayoutSnapshot,
     cols: u16,
+    geometry: &LayoutGeometry,
+    config: &crate::config::Config,
 ) -> io::Result<()> {
-    let mut line = String::new();
+    let color = |value: &str| crate::config::parse_color(value).unwrap();
+    let line_background = color(&config.buffer_line.background);
+    let intensity = if config.buffer_line.bold {
+        Attribute::Bold
+    } else {
+        Attribute::NormalIntensity
+    };
+    let mut width = 0usize;
+    queue!(output, MoveTo(0, 0))?;
     for (index, buffer) in snapshot.buffers.iter().enumerate() {
+        if width >= cols as usize {
+            break;
+        }
         if index > 0 {
-            line.push_str("  ");
+            let spaces = (cols as usize - width).min(2);
+            queue!(
+                output,
+                SetForegroundColor(line_background),
+                SetBackgroundColor(line_background),
+                SetAttribute(intensity),
+                Print(if spaces == 1 { " " } else { "  " })
+            )?;
+            width += spaces;
         }
-        if Some(*buffer) == snapshot.active_buffer {
-            line.push('[');
+        if width >= cols as usize {
+            break;
         }
-        if let Some(name) = snapshot.buffer_names.get(buffer) {
-            line.push_str(name);
+        let active = Some(*buffer) == snapshot.active_buffer;
+        let shown = geometry
+            .windows
+            .iter()
+            .any(|window| window.buffer == *buffer);
+        let (fg, bg, prefix, suffix, prefix_fg, prefix_bg, suffix_fg, suffix_bg) = if active {
+            (
+                &config.buffer_line.focused_foreground,
+                &config.buffer_line.focused_background,
+                &config.buffer_line.focused_prefix,
+                &config.buffer_line.focused_suffix,
+                &config.buffer_line.focused_prefix_foreground,
+                &config.buffer_line.focused_prefix_background,
+                &config.buffer_line.focused_suffix_foreground,
+                &config.buffer_line.focused_suffix_background,
+            )
+        } else if shown {
+            (
+                &config.buffer_line.shown_foreground,
+                &config.buffer_line.shown_background,
+                &config.buffer_line.shown_prefix,
+                &config.buffer_line.shown_suffix,
+                &config.buffer_line.shown_prefix_foreground,
+                &config.buffer_line.shown_prefix_background,
+                &config.buffer_line.shown_suffix_foreground,
+                &config.buffer_line.shown_suffix_background,
+            )
         } else {
-            line.push_str(&buffer.to_string());
+            (
+                &config.buffer_line.hidden_foreground,
+                &config.buffer_line.hidden_background,
+                &config.buffer_line.hidden_prefix,
+                &config.buffer_line.hidden_suffix,
+                &config.buffer_line.hidden_prefix_foreground,
+                &config.buffer_line.hidden_prefix_background,
+                &config.buffer_line.hidden_suffix_foreground,
+                &config.buffer_line.hidden_suffix_background,
+            )
+        };
+        let foreground = color(fg);
+        let background = color(bg);
+        let marker_foreground = if config.buffer_line.marker_color {
+            line_background
+        } else {
+            foreground
+        };
+        let prefix_foreground = prefix_fg.as_deref().map(color).unwrap_or(marker_foreground);
+        let prefix_background = prefix_bg.as_deref().map(color).unwrap_or(background);
+        let suffix_foreground = suffix_fg.as_deref().map(color).unwrap_or(marker_foreground);
+        let suffix_background = suffix_bg.as_deref().map(color).unwrap_or(background);
+        queue!(
+            output,
+            SetForegroundColor(prefix_foreground),
+            SetBackgroundColor(prefix_background),
+            SetAttribute(intensity)
+        )?;
+        if !draw_clipped_text(output, prefix, cols, &mut width)? {
+            break;
         }
-        if Some(*buffer) == snapshot.active_buffer {
-            line.push(']');
+        queue!(
+            output,
+            SetForegroundColor(foreground),
+            SetBackgroundColor(background),
+            SetAttribute(intensity)
+        )?;
+        let name = snapshot
+            .buffer_names
+            .get(buffer)
+            .map(String::as_str)
+            .unwrap_or_else(|| "");
+        if name.is_empty() {
+            if !draw_clipped_text(output, &buffer.to_string(), cols, &mut width)? {
+                break;
+            }
+        } else if !draw_clipped_text(output, name, cols, &mut width)? {
+            break;
+        }
+        queue!(
+            output,
+            SetForegroundColor(suffix_foreground),
+            SetBackgroundColor(suffix_background),
+            SetAttribute(intensity)
+        )?;
+        if !draw_clipped_text(output, suffix, cols, &mut width)? {
+            break;
         }
     }
-    draw_header_line(output, &line, cols)
+    queue!(
+        output,
+        SetForegroundColor(line_background),
+        SetBackgroundColor(line_background),
+        SetAttribute(intensity),
+        Print(" ".repeat(cols as usize - width.min(cols as usize))),
+        SetAttribute(Attribute::Reset)
+    )
 }
 
-fn draw_header_line(output: &mut impl Write, line: &str, cols: u16) -> io::Result<()> {
+fn draw_clipped_text(
+    output: &mut impl Write,
+    text: &str,
+    cols: u16,
+    width: &mut usize,
+) -> io::Result<bool> {
+    for ch in text.chars() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if *width + char_width > cols as usize {
+            return Ok(false);
+        }
+        queue!(output, Print(ch))?;
+        *width += char_width;
+    }
+    Ok(true)
+}
+
+fn draw_header_line(
+    output: &mut impl Write,
+    line: &str,
+    cols: u16,
+    config: &crate::config::Config,
+) -> io::Result<()> {
+    let foreground = config
+        .buffer_line
+        .rename_foreground
+        .as_deref()
+        .unwrap_or(&config.buffer_line.focused_foreground);
+    let background = config
+        .buffer_line
+        .rename_background
+        .as_deref()
+        .unwrap_or(&config.buffer_line.background);
+    let intensity = if config.buffer_line.bold {
+        Attribute::Bold
+    } else {
+        Attribute::NormalIntensity
+    };
     queue!(
         output,
         MoveTo(0, 0),
-        SetBackgroundColor(Color::DarkGrey),
-        SetForegroundColor(Color::White),
-        SetAttribute(Attribute::Bold)
+        SetBackgroundColor(crate::config::parse_color(background).unwrap()),
+        SetForegroundColor(crate::config::parse_color(foreground).unwrap()),
+        SetAttribute(intensity)
     )?;
     let mut visible = String::new();
     let mut width = 0;
@@ -177,14 +339,19 @@ fn draw_header_line(output: &mut impl Write, line: &str, cols: u16) -> io::Resul
     )
 }
 
-fn draw_pane(output: &mut impl Write, rect: PaneRect, parser: Option<&Parser>) -> io::Result<()> {
+fn draw_pane(
+    output: &mut impl Write,
+    rect: PaneRect,
+    parser: Option<&Parser>,
+    config: &crate::config::Config,
+) -> io::Result<()> {
     let Some(parser) = parser else {
-        return draw_pattern(output, rect);
+        return draw_pattern(output, rect, config);
     };
     let screen = parser.screen();
     let size = screen.size();
     let (origin_x, origin_y, width, height) = centered_origin(rect, (size.0.get(), size.1.get()));
-    draw_pattern_margins(output, rect, origin_x, origin_y, width, height)?;
+    draw_pattern_margins(output, rect, origin_x, origin_y, width, height, config)?;
 
     let mut previous_style = None;
     for row in 0..height {
@@ -277,23 +444,25 @@ fn apply_cell_style(
 fn draw_pattern_margins(
     output: &mut impl Write,
     rect: PaneRect,
-    content_x: u16,
-    content_y: u16,
-    content_width: u16,
-    content_height: u16,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    config: &crate::config::Config,
 ) -> io::Result<()> {
     let right = rect.x + rect.width;
     let bottom = rect.y + rect.height;
-    if content_y > rect.y {
+    if y > rect.y {
         draw_pattern(
             output,
             PaneRect {
-                height: content_y - rect.y,
+                height: y - rect.y,
                 ..rect
             },
+            config,
         )?;
     }
-    let content_bottom = content_y + content_height;
+    let content_bottom = y + height;
     if content_bottom < bottom {
         draw_pattern(
             output,
@@ -302,70 +471,96 @@ fn draw_pattern_margins(
                 height: bottom - content_bottom,
                 ..rect
             },
+            config,
         )?;
     }
-    if content_x > rect.x {
+    if x > rect.x {
         draw_pattern(
             output,
             PaneRect {
-                y: content_y,
-                width: content_x - rect.x,
-                height: content_height,
+                y,
+                width: x - rect.x,
+                height,
                 ..rect
             },
+            config,
         )?;
     }
-    let content_right = content_x + content_width;
+    let content_right = x + width;
     if content_right < right {
         draw_pattern(
             output,
             PaneRect {
                 x: content_right,
-                y: content_y,
+                y,
                 width: right - content_right,
-                height: content_height,
+                height,
                 ..rect
             },
+            config,
         )?;
     }
     Ok(())
 }
 
-fn draw_pattern(output: &mut impl Write, rect: PaneRect) -> io::Result<()> {
+fn draw_pattern(
+    output: &mut impl Write,
+    rect: PaneRect,
+    config: &crate::config::Config,
+) -> io::Result<()> {
     if rect.width == 0 || rect.height == 0 {
         return Ok(());
     }
     queue!(
         output,
-        SetForegroundColor(Color::DarkGrey),
-        SetBackgroundColor(Color::Reset),
-        SetAttribute(Attribute::Reset)
+        SetAttribute(Attribute::Reset),
+        SetForegroundColor(crate::config::parse_color(&config.margin.foreground).unwrap()),
+        SetBackgroundColor(crate::config::parse_color(&config.margin.background).unwrap())
     )?;
     for row in 0..rect.height {
         queue!(output, MoveTo(rect.x, rect.y + row))?;
         for col in 0..rect.width {
-            queue!(output, Print(if (row + col) % 2 == 0 { "." } else { " " }))?;
+            queue!(
+                output,
+                Print(if (row + col) % 2 == 0 {
+                    config.margin.fill.as_str()
+                } else {
+                    " "
+                })
+            )?;
         }
     }
     Ok(())
 }
 
-fn draw_dividers(output: &mut impl Write, geometry: &LayoutGeometry) -> io::Result<()> {
+fn draw_dividers(
+    output: &mut impl Write,
+    geometry: &LayoutGeometry,
+    config: &crate::config::Config,
+) -> io::Result<()> {
     queue!(
         output,
-        SetForegroundColor(Color::DarkGrey),
+        SetForegroundColor(crate::config::parse_color(&config.divider.foreground).unwrap()),
         SetBackgroundColor(Color::Reset)
     )?;
     for divider in &geometry.dividers {
         match *divider {
             Divider::Vertical { x, top, height } => {
                 for row in top..top + height {
-                    queue!(output, MoveTo(x, row), Print("│"))?;
+                    queue!(
+                        output,
+                        MoveTo(x, row),
+                        Print(config.divider.vertical.as_str())
+                    )?;
                 }
             }
             Divider::Horizontal { y, left, width } => {
                 for col in left..left + width {
-                    queue!(output, MoveTo(col, y), Print("─"))?;
+                    queue!(
+                        output,
+                        MoveTo(col, y),
+                        Print(config.divider.horizontal.as_str())
+                    )?;
                 }
             }
         }
@@ -542,6 +737,117 @@ mod tests {
         assert_eq!(screen.cell(0, 8).unwrap().contents(), "雪");
         assert!(screen.cell(0, 9).unwrap().is_wide_continuation());
         assert_eq!(screen.cell(0, 10).unwrap().contents(), "]");
+        if !std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
+            let marker = screen.cell(0, 7).unwrap();
+            let name = screen.cell(0, 8).unwrap();
+            assert_eq!(marker.fgcolor(), name.fgcolor());
+            assert_eq!(marker.bgcolor(), name.bgcolor());
+            assert_eq!(screen.cell(0, 10).unwrap().fgcolor(), name.fgcolor());
+            assert_eq!(screen.cell(0, 10).unwrap().bgcolor(), name.bgcolor());
+        }
+    }
+    #[test]
+    fn configured_buffer_markers_use_per_state_text_and_separator_colors() {
+        let mut config = crate::config::Config::default();
+        config.buffer_line.focused_prefix = "".into();
+        config.buffer_line.focused_suffix = "".into();
+        config.buffer_line.shown_prefix = "<".into();
+        config.buffer_line.shown_suffix = ">".into();
+        config.buffer_line.hidden_prefix = "{".into();
+        config.buffer_line.hidden_suffix = "}".into();
+        config.buffer_line.marker_color = true;
+        config.buffer_line.focused_background = "blue".into();
+        config.buffer_line.shown_background = "green".into();
+        config.buffer_line.hidden_background = "red".into();
+        config.buffer_line.focused_prefix_foreground = Some("red".into());
+        config.buffer_line.focused_prefix_background = Some("blue".into());
+        config.buffer_line.focused_suffix_foreground = Some("yellow".into());
+        config.buffer_line.shown_prefix_background = Some("magenta".into());
+        config.buffer_line.shown_suffix_foreground = Some("cyan".into());
+        config.buffer_line.hidden_suffix_foreground = Some("black".into());
+        config.buffer_line.hidden_suffix_background = Some("white".into());
+        let mut renderer = Renderer::with_config(config);
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Split {
+                axis: crate::layout::Axis::Vertical,
+                ratio: 50,
+                first: Box::new(crate::layout::WindowNode::Window { id: 1, buffer: 1 }),
+                second: Box::new(crate::layout::WindowNode::Window { id: 2, buffer: 2 }),
+            },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1, 2, 3],
+            buffer_names: HashMap::from([(1, "A".into()), (2, "B".into()), (3, "C".into())]),
+        });
+
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 20, 3).unwrap();
+        let mut terminal = Parser::new(
+            std::num::NonZeroU16::new(3).unwrap(),
+            std::num::NonZeroU16::new(20).unwrap(),
+            0,
+        );
+        terminal.process(&output);
+        let screen = terminal.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "");
+        assert_eq!(screen.cell(0, 1).unwrap().contents(), "A");
+        assert_eq!(screen.cell(0, 2).unwrap().contents(), "");
+        assert_eq!(screen.cell(0, 5).unwrap().contents(), "<");
+        assert_eq!(screen.cell(0, 6).unwrap().contents(), "B");
+        assert_eq!(screen.cell(0, 7).unwrap().contents(), ">");
+        assert_eq!(screen.cell(0, 10).unwrap().contents(), "{");
+        assert_eq!(screen.cell(0, 11).unwrap().contents(), "C");
+        assert_eq!(screen.cell(0, 12).unwrap().contents(), "}");
+        if !std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
+            let focused_marker = screen.cell(0, 0).unwrap();
+            assert_eq!(focused_marker.fgcolor(), VtColor::Idx(9));
+            assert_eq!(focused_marker.bgcolor(), VtColor::Idx(12));
+            let focused_name = screen.cell(0, 1).unwrap();
+            assert_eq!(focused_name.fgcolor(), VtColor::Idx(15));
+            assert_eq!(focused_name.bgcolor(), VtColor::Idx(12));
+            assert_eq!(screen.cell(0, 2).unwrap().fgcolor(), VtColor::Idx(11));
+            assert_eq!(screen.cell(0, 2).unwrap().bgcolor(), VtColor::Idx(12));
+            let shown_marker = screen.cell(0, 5).unwrap();
+            assert_eq!(shown_marker.fgcolor(), VtColor::Idx(8));
+            assert_eq!(shown_marker.bgcolor(), VtColor::Idx(13));
+            let shown_suffix = screen.cell(0, 7).unwrap();
+            assert_eq!(shown_suffix.fgcolor(), VtColor::Idx(14));
+            assert_eq!(shown_suffix.bgcolor(), VtColor::Idx(10));
+            let hidden_marker = screen.cell(0, 10).unwrap();
+            assert_eq!(hidden_marker.fgcolor(), VtColor::Idx(8));
+            assert_eq!(hidden_marker.bgcolor(), VtColor::Idx(9));
+            let hidden_suffix = screen.cell(0, 12).unwrap();
+            assert_eq!(hidden_suffix.fgcolor(), VtColor::Idx(0));
+            assert_eq!(hidden_suffix.bgcolor(), VtColor::Idx(15));
+        }
+    }
+
+    #[test]
+    fn custom_buffer_markers_clip_on_unicode_cell_boundaries() {
+        let mut config = crate::config::Config::default();
+        config.buffer_line.focused_prefix = "界".into();
+        config.buffer_line.focused_suffix = "".into();
+        let mut renderer = Renderer::with_config(config);
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 1 },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1],
+            buffer_names: HashMap::from([(1, "雪".into())]),
+        });
+
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 3, 3).unwrap();
+        let mut terminal = Parser::new(
+            std::num::NonZeroU16::new(3).unwrap(),
+            std::num::NonZeroU16::new(3).unwrap(),
+            0,
+        );
+        terminal.process(&output);
+        let screen = terminal.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "界");
+        assert!(screen.cell(0, 1).unwrap().is_wide_continuation());
+        assert_eq!(screen.cell(0, 2).unwrap().contents(), " ");
     }
 
     #[test]
@@ -576,6 +882,41 @@ mod tests {
         renderer.draw(&mut output, 20, 3).unwrap();
         terminal.process(&output);
         assert_eq!(terminal.screen().cell(0, 0).unwrap().contents(), "[");
+    }
+
+    #[test]
+    fn rename_prompt_inherits_colors_and_accepts_overrides() {
+        for (overrides, expected_fg, expected_bg) in [
+            ("", VtColor::Rgb(255, 158, 100), VtColor::Rgb(22, 22, 30)),
+            (
+                "rename_foreground = \"#010203\"\nrename_background = \"#040506\"\n",
+                VtColor::Rgb(1, 2, 3),
+                VtColor::Rgb(4, 5, 6),
+            ),
+        ] {
+            let config: crate::config::Config = toml::from_str(&format!(
+                "[buffer_line]\nbold = false\nfocused_foreground = \"#ff9e64\"\nbackground = \"#16161e\"\n{overrides}"
+            )).unwrap();
+            let mut output = Vec::new();
+            draw_header_line(&mut output, "Rename 7: shell", 20, &config).unwrap();
+            let mut terminal = Parser::new(
+                std::num::NonZeroU16::new(3).unwrap(),
+                std::num::NonZeroU16::new(20).unwrap(),
+                0,
+            );
+            terminal.process(&output);
+            let cell = terminal.screen().cell(0, 0).unwrap();
+            assert_eq!(cell.contents(), "R");
+            assert!(!cell.bold());
+            if !std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
+                assert_eq!(cell.fgcolor(), expected_fg);
+                assert_eq!(cell.bgcolor(), expected_bg);
+                assert_eq!(
+                    terminal.screen().cell(0, 19).unwrap().bgcolor(),
+                    expected_bg
+                );
+            }
+        }
     }
 
     #[test]
@@ -651,5 +992,156 @@ mod tests {
                 .kind(),
             io::ErrorKind::InvalidData
         );
+    }
+    #[test]
+    fn buffer_line_uses_focused_shown_hidden_and_fill_styles() {
+        let mut config = crate::config::Config::default();
+        config.buffer_line.focused_foreground = "#ff0000".into();
+        config.buffer_line.focused_background = "#010203".into();
+        config.buffer_line.shown_foreground = "#00ff00".into();
+        config.buffer_line.shown_background = "#040506".into();
+        config.buffer_line.hidden_foreground = "#0000ff".into();
+        config.buffer_line.hidden_background = "#070809".into();
+        config.buffer_line.background = "#0a0b0c".into();
+        config.divider.foreground = "#abcdef".into();
+        config.divider.vertical = "|".into();
+        config.margin.foreground = "#123456".into();
+        config.margin.background = "#654321".into();
+        config.margin.fill = "~".into();
+        let mut renderer = Renderer::with_config(config);
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Split {
+                axis: crate::layout::Axis::Vertical,
+                ratio: 50,
+                first: Box::new(crate::layout::WindowNode::Window { id: 1, buffer: 1 }),
+                second: Box::new(crate::layout::WindowNode::Window { id: 2, buffer: 2 }),
+            },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1, 2, 3],
+            buffer_names: HashMap::from([(1, "a".into()), (2, "b".into()), (3, "c".into())]),
+        });
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 20, 3).unwrap();
+        let mut terminal = Parser::new(
+            std::num::NonZeroU16::new(3).unwrap(),
+            std::num::NonZeroU16::new(20).unwrap(),
+            0,
+        );
+        terminal.process(&output);
+        let screen = terminal.screen();
+        if std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
+            for cell in [
+                screen.cell(0, 0).unwrap(),
+                screen.cell(0, 5).unwrap(),
+                screen.cell(0, 8).unwrap(),
+                screen.cell(1, 0).unwrap(),
+            ] {
+                assert_eq!(cell.fgcolor(), VtColor::Default);
+                assert_eq!(cell.bgcolor(), VtColor::Default);
+            }
+        } else {
+            assert_eq!(
+                screen.cell(0, 0).unwrap().fgcolor(),
+                VtColor::Rgb(255, 0, 0)
+            );
+            assert_eq!(screen.cell(0, 0).unwrap().bgcolor(), VtColor::Rgb(1, 2, 3));
+            assert_eq!(
+                screen.cell(0, 5).unwrap().fgcolor(),
+                VtColor::Rgb(0, 255, 0)
+            );
+            assert_eq!(screen.cell(0, 5).unwrap().bgcolor(), VtColor::Rgb(4, 5, 6));
+            assert_eq!(
+                screen.cell(0, 8).unwrap().fgcolor(),
+                VtColor::Rgb(0, 0, 255)
+            );
+            assert_eq!(screen.cell(0, 8).unwrap().bgcolor(), VtColor::Rgb(7, 8, 9));
+            assert_eq!(
+                screen.cell(0, 12).unwrap().bgcolor(),
+                VtColor::Rgb(10, 11, 12)
+            );
+            assert_eq!(
+                screen.cell(1, 0).unwrap().fgcolor(),
+                VtColor::Rgb(18, 52, 86)
+            );
+            assert_eq!(
+                screen.cell(1, 0).unwrap().bgcolor(),
+                VtColor::Rgb(101, 67, 33)
+            );
+            assert_eq!(
+                screen.cell(1, 9).unwrap().fgcolor(),
+                VtColor::Rgb(171, 205, 239)
+            );
+        }
+        assert!(screen.cell(0, 0).unwrap().bold());
+        assert!(screen.cell(0, 5).unwrap().bold());
+        assert!(screen.cell(0, 8).unwrap().bold());
+        assert_eq!(screen.cell(1, 9).unwrap().contents(), "|");
+    }
+
+    #[test]
+    fn buffer_line_bold_setting_controls_all_buffer_states() {
+        let snapshot = LayoutSnapshot {
+            tree: crate::layout::WindowNode::Split {
+                axis: crate::layout::Axis::Vertical,
+                ratio: 50,
+                first: Box::new(crate::layout::WindowNode::Window { id: 1, buffer: 1 }),
+                second: Box::new(crate::layout::WindowNode::Window { id: 2, buffer: 2 }),
+            },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1, 2, 3],
+            buffer_names: HashMap::from([(1, "a".into()), (2, "b".into()), (3, "c".into())]),
+        };
+        for bold in [false, true] {
+            let config: crate::config::Config =
+                toml::from_str(&format!("[buffer_line]\nbold = {bold}\n")).unwrap();
+            let mut output = b"\x1b[1m".to_vec();
+            draw_buffer_line(
+                &mut output,
+                &snapshot,
+                20,
+                &snapshot.geometry(20, 3),
+                &config,
+            )
+            .unwrap();
+            let mut terminal = Parser::new(
+                std::num::NonZeroU16::new(3).unwrap(),
+                std::num::NonZeroU16::new(20).unwrap(),
+                0,
+            );
+            terminal.process(&output);
+            for col in [1, 5, 8] {
+                assert_eq!(terminal.screen().cell(0, col).unwrap().bold(), bold);
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_buffer_line_does_not_wrap_separator_into_panes() {
+        let snapshot = LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 1 },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1, 2],
+            buffer_names: HashMap::from([(1, "a".into()), (2, "b".into())]),
+        };
+        let geometry = snapshot.geometry(3, 1);
+        let mut output = Vec::new();
+        draw_buffer_line(
+            &mut output,
+            &snapshot,
+            3,
+            &geometry,
+            &crate::config::Config::default(),
+        )
+        .unwrap();
+        let mut terminal = Parser::new(
+            std::num::NonZeroU16::new(2).unwrap(),
+            std::num::NonZeroU16::new(3).unwrap(),
+            0,
+        );
+        terminal.process(&output);
+        assert_eq!(terminal.screen().cell(1, 0).unwrap().contents(), "");
     }
 }
