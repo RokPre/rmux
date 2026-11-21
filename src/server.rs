@@ -54,6 +54,7 @@ struct Client {
     stream: UnixStream,
     rows: u16,
     cols: u16,
+    resize_step: u8,
 }
 
 struct Buffer {
@@ -397,6 +398,7 @@ fn attach_client(
                 stream: stream.try_clone()?,
                 rows,
                 cols,
+                resize_step: request.resize_step.clamp(1, 50),
             },
         );
         resize_visible_buffers(&mut state);
@@ -439,7 +441,13 @@ fn attach_client(
             CLOSE_WINDOW if payload.is_empty() => close_focused_window(&session),
             FOCUS_WINDOW if payload.len() == 1 => focus_window(&session, payload[0]),
             MOVE_WINDOW if payload.len() == 1 => move_focused_window(&session, payload[0]),
-            RESIZE_WINDOW if payload.len() == 1 => resize_focused_window(&session, payload[0]),
+            RESIZE_WINDOW if payload.len() == 1 => {
+                let step = lock_state(&session)
+                    .clients
+                    .get(&id)
+                    .map_or(5, |client| client.resize_step);
+                resize_focused_window(&session, payload[0], step);
+            }
             REORDER_BUFFER_LEFT if payload.is_empty() => reorder_buffer(&session, false),
             REORDER_BUFFER_RIGHT if payload.is_empty() => reorder_buffer(&session, true),
             EQUALIZE_WINDOWS if payload.is_empty() => equalize_windows(&session),
@@ -609,12 +617,12 @@ fn move_focused_window(session: &Session, encoded_direction: u8) {
     }
 }
 
-fn resize_focused_window(session: &Session, encoded_direction: u8) {
+fn resize_focused_window(session: &Session, encoded_direction: u8, step: u8) {
     let Some(direction) = Direction::from_byte(encoded_direction) else {
         return;
     };
     let mut state = lock_state(session);
-    if state.layout.resize_focused_window(direction) {
+    if state.layout.resize_focused_window(direction, step) {
         resize_visible_buffers(&mut state);
         send_layout(&mut state);
         send_visible_buffer_snapshots(&mut state);
@@ -906,6 +914,7 @@ fn identity_response(name: &str) -> Response {
         name: name.into(),
         pid: std::process::id(),
         start_time: process_start_time(std::process::id()).unwrap_or_default(),
+        supports_resize_step: true,
     }
 }
 
@@ -916,6 +925,7 @@ fn error_response(error: &str) -> Response {
         name: String::new(),
         pid: 0,
         start_time: 0,
+        supports_resize_step: true,
     }
 }
 

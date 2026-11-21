@@ -111,7 +111,11 @@ impl RenamePrompt {
     }
 }
 
-pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
+pub(crate) fn attach(
+    paths: &SessionPaths,
+    name: &str,
+    config: crate::config::Config,
+) -> io::Result<()> {
     let (cols, rows) = terminal_size();
     let mut writer = UnixStream::connect(paths.socket_path(name))?;
     writer.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -123,6 +127,7 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
             name: name.into(),
             rows: rows.max(1),
             cols: cols.max(1),
+            resize_step: config.resize.step_percent,
         },
     )?;
     let mut reader = std::io::BufReader::new(writer.try_clone()?);
@@ -130,6 +135,7 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
     if !response.ok {
         return Err(io::Error::other(response.error));
     }
+    ensure_resize_support(config.resize.step_percent, response.supports_resize_step)?;
 
     let _raw_mode = RawMode::enable()?;
     let _terminal_screen = TerminalScreen::enter()?;
@@ -155,8 +161,8 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
     let mut last_size = (cols, rows);
     let mut last_resize_check = Instant::now();
     let mut input_buffer = [0u8; 16 * 1024];
-    let mut renderer = Renderer::default();
-    let mut input_decoder = InputDecoder::default();
+    let mut renderer = Renderer::with_config(config.clone());
+    let mut input_decoder = InputDecoder::configured(&config);
     let mut rename_prompt = None;
 
     loop {
@@ -264,6 +270,16 @@ pub(crate) fn attach(paths: &SessionPaths, name: &str) -> io::Result<()> {
                 renderer.draw(&mut output, last_size.0, last_size.1)?;
             }
         }
+    }
+    Ok(())
+}
+
+fn ensure_resize_support(step: u8, supported: bool) -> io::Result<()> {
+    if step != 5 && !supported {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "session server does not support per-client resize_step; set resize.step_percent to 5 to attach",
+        ));
     }
     Ok(())
 }
@@ -539,6 +555,15 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
         assert!(prompt.is_none());
+    }
+    #[test]
+    fn resize_step_requires_server_capability_only_when_nondefault() {
+        assert!(ensure_resize_support(5, false).is_ok());
+        assert!(ensure_resize_support(12, true).is_ok());
+        assert_eq!(
+            ensure_resize_support(12, false).unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
     }
 }
 

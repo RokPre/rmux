@@ -1,6 +1,15 @@
 # TODOs
 
+- [ ] TODO: Add configurable per-window borders and gaps [window_borders](#window_borders)
 
+
+
+## window_borders
+
+- Scope: coordinated
+- Dependency: configuration
+
+Add optional individual borders around rmux windows, with configurable characters and distinct focused and unfocused colors, plus configurable gaps between adjacent borders or dividers. Preserve the existing single-divider layout as the default. Ensure borders and gaps are reflected consistently in rendering and shared buffer sizing, including small windows and multiple differently sized clients. Revisit and update border configuration when the implementation is designed.
 
 # DONEs
 
@@ -138,6 +147,36 @@
       - [x] DONE: Document the supported keyboard controls and conflicts [document_controls](#document_controls)
       - [x] DONE: Document session, buffer and window lifetime behavior [document_lifecycle](#document_lifecycle)
       - [x] DONE: Document shared attachments and buffer sizing [document_views](#document_views)
+- [x] DONE: Add user configuration for rmux [configuration](#configuration)
+  - [x] DONE: Load TOML configuration with defaults [config_loading](#config_loading)
+    - [x] DONE: Define configuration types and defaults [config_schema](#config_schema)
+    - [x] DONE: Locate the configuration file [config_path](#config_path)
+    - [x] DONE: Read the configuration file [config_read](#config_read)
+    - [x] DONE: Parse TOML into configuration [config_parse](#config_parse)
+    - [x] DONE: Validate configuration values [config_validate](#config_validate)
+    - [x] DONE: Test configuration loading and errors [config_load_tests](#config_load_tests)
+    - [x] DONE: Load configuration when rmux starts [config_startup](#config_startup)
+    - [x] DONE: Test configuration across session startup and attachment [config_start_tests](#config_start_tests)
+  - [x] DONE: Configure rmux keybindings [config_keys](#config_keys)
+    - [x] DONE: Define keybinding syntax [keys_syntax](#keys_syntax)
+    - [x] DONE: Parse configured keybindings [keys_parse](#keys_parse)
+    - [x] DONE: Apply configured keybindings [keys_apply](#keys_apply)
+    - [x] DONE: Test configurable keybindings [keys_tests](#keys_tests)
+  - [x] DONE: Configure buffer-line colors [config_buffer_colors](#config_buffer_colors)
+    - [x] DONE: Identify buffer visibility states [buffer_color_states](#buffer_color_states)
+    - [x] DONE: Render configured buffer-line colors [buffer_color_render](#buffer_color_render)
+    - [x] DONE: Test buffer-line colors [buffer_color_tests](#buffer_color_tests)
+  - [x] DONE: Configure existing window dividers [config_dividers](#config_dividers)
+    - [x] DONE: Render configured divider styles [divider_style](#divider_style)
+    - [x] DONE: Test divider styles [divider_tests](#divider_tests)
+  - [x] DONE: Configure unused-space fill [config_margin](#config_margin)
+    - [x] DONE: Render configured margin fill [margin_style](#margin_style)
+    - [x] DONE: Test margin fill [margin_tests](#margin_tests)
+  - [x] DONE: Configure window resize step [config_resize](#config_resize)
+    - [x] DONE: Apply configured window resize step [resize_apply](#resize_apply)
+    - [x] DONE: Test configurable resize step [resize_tests](#resize_tests)
+  - [x] DONE: Document user configuration [config_docs](#config_docs)
+- [x] DONE: Configure buffer-line prefixes and suffixes [buffer_line_markers](#buffer_line_markers)
 ## rmux
 
 - Role: material
@@ -1052,4 +1091,239 @@ Atuin interactive history search previously timed out because the rmux buffer te
 - Scope: local
 
 The user reported that the first uncolored text appeared gray after the buffer line. Fixed a renderer ordering bug that reset the first pane cell after setting its colors. A color-enabled regression test verifies the first colored cell and subsequent default-colored cell. The user opened a fresh session through Super+Ctrl+T, cleared the screen, and confirmed the color was correct.
+
+## configuration
+
+- Role: material
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Uncertainty: high
+- Children: config_loading & config_keys & config_buffer_colors & config_dividers & config_margin & config_resize & config_docs
+
+Add user configuration in ~/.config/rmux/config.toml, retaining current behavior when settings are omitted. Cover existing rmux keybindings, buffer-line colors, current single-divider characters and colors, unused-space fill and color, and window resize step. Keep configuration for future per-window borders best effort: the border design may change when window_borders is implemented. Buffer-line markers are tracked by buffer_line_markers; Vim-mode configuration belongs with vim_mode when implemented. Define exact syntax and error behavior during implementation.
+
+Grouped plan:
+- Material: develop the complete configuration feature in a worktree.
+- Composite 1: configuration and controls. Review the TOML loading and defaults as one molecule, then keybindings and resize-step behavior as a second molecule; commit them together.
+- Composite 2: configuration appearance and documentation. Review buffer-line colors as one molecule, divider and unused-space styling as a second molecule, and the documentation after those settings work; commit them together.
+- Keep the feature groups and their atomic steps as the completion checklist. The grouped plan can change as implementation reveals better boundaries.
+
+Load configuration at startup or attachment. Hot reload is outside the scope of this task and will not be implemented.
+
+## config_loading
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 6 kyu
+- Children: config_schema & config_path & config_read & config_parse & config_validate & config_load_tests & config_startup & config_start_tests
+
+Load ~/.config/rmux/config.toml and apply existing defaults for omitted settings; report invalid configuration clearly.
+
+## config_schema
+
+- Role: atomic
+
+Represent supported TOML settings with defaults matching existing behavior.
+
+## config_path
+
+- Role: atomic
+
+Resolve the agreed ~/.config/rmux/config.toml path without requiring the file to exist.
+
+## config_read
+
+- Role: atomic
+- Dependency: config_path
+
+Read the file when present and report file access errors.
+
+## config_parse
+
+- Role: atomic
+- Dependency: config_schema & config_read
+
+Parse the file into the configuration types and report malformed TOML.
+
+## config_validate
+
+- Role: atomic
+- Dependency: config_parse
+
+Reject invalid settings with actionable errors while retaining defaults for omitted values.
+
+## config_load_tests
+
+- Role: atomic
+- Dependency: config_validate
+
+Cover missing and partial files, valid TOML, malformed TOML, invalid settings, and read errors.
+
+## config_startup
+
+- Role: atomic
+- Dependency: config_validate
+
+Integrate configuration loading into client and session-server startup and provide the resulting settings to their consumers. Define which settings belong to an attachment and which belong to a session.
+
+## config_start_tests
+
+- Role: atomic
+- Dependency: config_startup
+
+Verify settings reach the client and server, including attachment to an existing session and changes to the configuration between launches.
+
+## config_keys
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Dependency: config_loading
+- Children: keys_syntax & keys_parse & keys_apply & keys_tests
+
+Apply configured shortcuts to every existing rmux command and retain the existing defaults for omitted bindings.
+
+## keys_syntax
+
+- Role: atomic
+- Dependency: config_loading
+
+Choose a readable representation for existing commands and terminal key sequences, including conflicting bindings.
+
+## keys_parse
+
+- Role: atomic
+- Dependency: keys_syntax
+
+Convert configured keys to input sequences and reject invalid or conflicting bindings.
+
+## keys_apply
+
+- Role: atomic
+- Dependency: keys_parse
+
+Use configured bindings for existing commands while keeping omitted bindings at their defaults.
+
+## keys_tests
+
+- Role: atomic
+- Dependency: keys_apply
+
+Verify remapping, defaults, conflicts, and ordinary input passthrough through the client.
+
+## config_buffer_colors
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Dependency: config_loading
+- Children: buffer_color_states & buffer_color_render & buffer_color_tests
+
+Configure the line background and foreground and background colors for focused, shown-but-not-focused, and unshown buffers.
+
+## buffer_color_states
+
+- Role: atomic
+- Dependency: config_loading
+
+Distinguish focused, shown-but-not-focused, and unshown buffers in the buffer line.
+
+## buffer_color_render
+
+- Role: atomic
+- Dependency: buffer_color_states
+
+Apply the configured background and each state foreground and background.
+
+## buffer_color_tests
+
+- Role: atomic
+- Dependency: buffer_color_render
+
+Verify state-specific colors and defaults with multiple visible and hidden buffers.
+
+## config_dividers
+
+- Role: molecule
+- Scope: local
+- Difficulty: 6 kyu
+- Dependency: config_loading
+- Children: divider_style & divider_tests
+
+Configure the characters and color of the existing single dividers, preserving their current appearance by default; future border settings are best effort.
+
+## divider_style
+
+- Role: atomic
+- Dependency: config_loading
+
+Apply configured characters and color to existing horizontal and vertical dividers without changing default geometry.
+
+## divider_tests
+
+- Role: atomic
+- Dependency: divider_style
+
+Verify custom divider appearance and existing defaults.
+
+## config_margin
+
+- Role: molecule
+- Scope: local
+- Difficulty: 6 kyu
+- Dependency: config_loading
+- Children: margin_style & margin_tests
+
+Configure the fill and color around buffer views smaller than their windows.
+
+## margin_style
+
+- Role: atomic
+- Dependency: config_loading
+
+Apply the configured fill and color to unused space around smaller buffer views.
+
+## margin_tests
+
+- Role: atomic
+- Dependency: margin_style
+
+Verify custom and default fill in differently sized views of the same buffer.
+
+## config_resize
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 5 kyu
+- Dependency: config_loading
+- Children: resize_apply & resize_tests
+
+Apply a configured resize step to window resizing while retaining the current default.
+
+## resize_apply
+
+- Role: atomic
+- Dependency: config_loading
+
+Use the configured step for window resizing while retaining the current default.
+
+## resize_tests
+
+- Role: atomic
+- Dependency: resize_apply
+
+Verify configured and default resize steps and boundary behavior.
+
+## config_docs
+
+- Role: atomic
+- Dependency: config_keys & config_buffer_colors & config_dividers & config_margin & config_resize
+
+Document the supported TOML settings, defaults, and keybinding syntax after the behavior works.
+
+## buffer_line_markers
+
+- Dependency: configuration
+
+Allow independent prefix and suffix characters for buffer names in each buffer-line state: focused, shown in another rmux window, and unshown. Configure them alongside the corresponding colors in ~/.config/rmux/config.toml. Support ASCII and Unicode characters, including Nerd Font glyphs, and account for their terminal display widths. Preserve the current focused-buffer brackets and other existing appearance as defaults.
 

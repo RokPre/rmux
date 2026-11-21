@@ -1,19 +1,19 @@
 mod client;
+mod config;
 mod input;
 mod layout;
 mod render;
 mod runtime;
 mod server;
 
+use config::Config;
+use runtime::SessionPaths;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-
-use runtime::SessionPaths;
-use serde::{Deserialize, Serialize};
-
 const USAGE: &str = "usage: rmux {new|up} NAME [--cwd DIRECTORY] [-- COMMAND [ARG...]] | rmux {attach|kill} NAME | rmux ls";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,6 +25,12 @@ pub(crate) struct Request {
     pub rows: u16,
     #[serde(default)]
     pub cols: u16,
+    #[serde(default = "default_resize_step")]
+    pub resize_step: u8,
+}
+
+fn default_resize_step() -> u8 {
+    5
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,6 +44,8 @@ pub(crate) struct Response {
     pub pid: u32,
     #[serde(default)]
     pub start_time: u64,
+    #[serde(default)]
+    pub supports_resize_step: bool,
 }
 
 fn main() {
@@ -67,6 +75,12 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         return Ok(());
     }
 
+    let config = if mode == "kill" {
+        None
+    } else {
+        Some(Config::load()?)
+    };
+
     let name = name.expect("session commands require a name");
     let lock = paths.lock(&name).map_err(|error| error.to_string())?;
     let existing = paths.probe(&name).map_err(|error| error.to_string())?;
@@ -95,7 +109,12 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
     }
 
     drop(lock);
-    client::attach(&paths, &name).map_err(|error| error.to_string())
+    client::attach(
+        &paths,
+        &name,
+        config.expect("non-kill commands load config"),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn parse_args(
@@ -222,7 +241,7 @@ fn start_server(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, validate_name};
+    use super::{Response, parse_args, validate_name};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -251,5 +270,10 @@ mod tests {
         for name in ["", ".", "..", "../bad", "bad\nname", "bad\u{1b}name"] {
             assert!(validate_name(name).is_err(), "accepted {name:?}");
         }
+    }
+    #[test]
+    fn older_server_responses_default_to_no_resize_step_support() {
+        let response: Response = serde_json::from_str(r#"{"ok":true,"name":"old"}"#).unwrap();
+        assert!(!response.supports_resize_step);
     }
 }
