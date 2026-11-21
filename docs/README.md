@@ -56,7 +56,7 @@ The buffer line is drawn across the top of each attached terminal. Labels appear
 | `Ctrl-T` | Create an interactive-shell buffer and show it in the focused rmux window. |
 | `Ctrl-W` | Close the focused buffer. Every rmux window showing it switches to a remaining buffer. |
 | `Ctrl-H` / `Ctrl-L` | Show the previous / next buffer in the focused rmux window. |
-| `Ctrl-R` | Rename the focused buffer. Enter saves, Escape cancels, and Ctrl-U clears the name back to its numeric ID. |
+| `Ctrl-R` | Rename the focused buffer. Enter saves, Escape cancels, Ctrl-U clears the name, Ctrl-Backspace deletes the previous word, and Ctrl-Left/Right move between words. An empty name restores the numeric ID. |
 | `Ctrl-Shift-H` / `Ctrl-Shift-L` | Move the focused buffer left / right in the buffer line. |
 | `Alt-V` / `Alt-B` | Split the focused rmux window vertically (side by side) / horizontally (top and bottom). The new window shows the same buffer. |
 | `Alt-W` | Close the focused rmux window. The final rmux window cannot be closed. |

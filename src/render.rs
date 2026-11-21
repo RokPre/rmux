@@ -17,7 +17,7 @@ pub(crate) const BUFFER_OUTPUT: u8 = 5;
 pub(crate) struct Renderer {
     snapshot: Option<LayoutSnapshot>,
     parsers: HashMap<u64, Parser>,
-    prompt: Option<String>,
+    prompt: Option<(String, usize)>,
     bracketed_paste: Option<bool>,
     config: crate::config::Config,
 }
@@ -94,7 +94,7 @@ impl Renderer {
             .is_some_and(|snapshot| snapshot.buffers.contains(&buffer))
     }
 
-    pub(crate) fn set_prompt(&mut self, prompt: Option<String>) {
+    pub(crate) fn set_prompt(&mut self, prompt: Option<(String, usize)>) {
         self.prompt = prompt;
     }
 
@@ -117,7 +117,7 @@ impl Renderer {
         let geometry = snapshot.geometry(cols, rows);
         queue!(output, Hide)?;
         if rows >= 3 {
-            if let Some(prompt) = self.prompt.as_ref() {
+            if let Some((prompt, _)) = self.prompt.as_ref() {
                 draw_header_line(output, prompt, cols, &self.config)?;
             } else {
                 draw_buffer_line(output, snapshot, cols, &geometry, &self.config)?;
@@ -132,9 +132,14 @@ impl Renderer {
             )?;
         }
         draw_dividers(output, &geometry, &self.config)?;
-        if let Some(prompt) = self.prompt.as_ref() {
+        if let Some((prompt, cursor_byte)) = self.prompt.as_ref() {
             if rows >= 3 && cols > 0 {
-                let cursor_col = UnicodeWidthStr::width(prompt.as_str())
+                let cursor_byte = (*cursor_byte).min(prompt.len());
+                let cursor_byte = (0..=cursor_byte)
+                    .rev()
+                    .find(|&index| prompt.is_char_boundary(index))
+                    .unwrap_or(0);
+                let cursor_col = UnicodeWidthStr::width(&prompt[..cursor_byte])
                     .min(cols.saturating_sub(1) as usize) as u16;
                 queue!(output, MoveTo(cursor_col, 0), Show)?;
             }
@@ -651,7 +656,7 @@ mod tests {
         renderer.draw(&mut output, 10, 3).unwrap();
         assert!(output.windows(8).any(|bytes| bytes == b"\x1b[?2004h"));
         output.clear();
-        renderer.set_prompt(Some("rename".into()));
+        renderer.set_prompt(Some(("rename".into(), 6)));
         renderer.draw(&mut output, 10, 3).unwrap();
         assert!(output.windows(8).any(|bytes| bytes == b"\x1b[?2004l"));
         output.clear();
@@ -909,7 +914,7 @@ mod tests {
             buffers: vec![7],
             buffer_names: HashMap::from([(7, "shell".into())]),
         });
-        renderer.set_prompt(Some("Rename 7: shell".into()));
+        renderer.set_prompt(Some(("Rename 7: shell".into(), 15)));
 
         let mut output = Vec::new();
         renderer.draw(&mut output, 20, 3).unwrap();
@@ -931,6 +936,30 @@ mod tests {
         renderer.draw(&mut output, 20, 3).unwrap();
         terminal.process(&output);
         assert_eq!(terminal.screen().cell(0, 0).unwrap().contents(), "[");
+    }
+
+    #[test]
+    fn rename_prompt_positions_cursor_by_unicode_display_width() {
+        let mut renderer = Renderer::default();
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 7 },
+            focused_window: 1,
+            active_buffer: Some(7),
+            buffers: vec![7],
+            buffer_names: HashMap::new(),
+        });
+        let prompt = "名前: x";
+        renderer.set_prompt(Some((prompt.into(), "名前: ".len())));
+
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 20, 3).unwrap();
+        let mut terminal = Parser::new(
+            std::num::NonZeroU16::new(3).unwrap(),
+            std::num::NonZeroU16::new(20).unwrap(),
+            0,
+        );
+        terminal.process(&output);
+        assert_eq!(terminal.screen().cursor_position(), (0, 6));
     }
 
     #[test]

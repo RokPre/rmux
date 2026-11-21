@@ -363,6 +363,33 @@ class Sessions(unittest.TestCase):
             control.close()
 
 
+    def test_rename_word_editing_and_escape(self):
+        _, fd = self.start('new', 'word-rename', '--', 'sh', '-i')
+        self.wait_for(lambda: self.run_rmux('ls').stdout == 'word-rename\n')
+        control = self.attach_control('word-rename')
+        try:
+            self.read_layout(control)
+            time.sleep(0.1)
+            os.write(fd, b'\x12')
+            time.sleep(0.1)
+            os.write(fd, '\x15one 雪 three'.encode())
+            os.write(fd, b'\x1b[1;5D')
+            os.write(fd, b'\x1b\x7f')
+            os.write(fd, b'new ')
+            os.write(fd, b'\r')
+            self.assertEqual(self.read_layout(control)['buffer_names']['1'], 'one new three')
+
+            os.write(fd, b'\x12')
+            time.sleep(0.1)
+            os.write(fd, b'\x15discard\x1b')
+            time.sleep(0.15)
+            os.write(fd, b'\x12')
+            time.sleep(0.1)
+            os.write(fd, b'\x15kept\r')
+            self.assertEqual(self.read_layout(control)['buffer_names']['1'], 'kept')
+        finally:
+            control.close()
+
     def test_buffer_rename_is_shared_without_changing_buffer_identity_or_order(self):
         self.start('new', 'rename', '--', 'sh', '-i')
         self.wait_for(lambda: self.run_rmux('ls').stdout == 'rename\n')

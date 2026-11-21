@@ -11,6 +11,9 @@ use crate::render::{BUFFER_OUTPUT, BUFFER_SNAPSHOT, Renderer};
 use crate::runtime::{SessionPaths, read_response, write_request};
 use crate::server::{CLOSE, INPUT, RENAME_BUFFER, RESIZE, WINDOW_STATE, read_frame, write_frame};
 
+const PROMPT_ESCAPE_TIMEOUT: Duration = Duration::from_millis(40);
+const PROMPT_KEYS: &[&[u8]] = &[b"\x1b\x7f", b"\x1b\x08", b"\x1b[1;5D", b"\x1b[1;5C"];
+
 struct RawMode;
 struct TerminalScreen;
 
@@ -53,6 +56,9 @@ impl Drop for TerminalScreen {
 struct RenamePrompt {
     buffer: u64,
     name: String,
+    cursor: usize,
+    pending_escape: Vec<u8>,
+    escape_started: Option<Instant>,
     pending_utf8: Vec<u8>,
 }
 
@@ -65,36 +71,94 @@ enum PromptResult {
 
 impl RenamePrompt {
     fn new(buffer: u64, name: String) -> Self {
+        let cursor = name.len();
         Self {
             buffer,
             name,
+            cursor,
+            pending_escape: Vec::new(),
+            escape_started: None,
             pending_utf8: Vec::new(),
         }
     }
 
-    fn display(&self) -> String {
-        format!("Rename {}: {}", self.buffer, self.name)
+    fn display(&self) -> (String, usize) {
+        let prefix = format!("Rename {}: ", self.buffer);
+        let cursor = prefix.len() + self.cursor;
+        (prefix + &self.name, cursor)
     }
 
     fn feed(&mut self, bytes: &[u8]) -> (PromptResult, usize) {
         for (index, &byte) in bytes.iter().enumerate() {
+            if !self.pending_escape.is_empty() {
+                self.pending_escape.push(byte);
+                if PROMPT_KEYS.contains(&self.pending_escape.as_slice()) {
+                    match self.pending_escape.as_slice() {
+                        b"\x1b\x7f" | b"\x1b\x08" => self.delete_previous_word(),
+                        b"\x1b[1;5D" => self.cursor = self.previous_word(),
+                        b"\x1b[1;5C" => self.cursor = self.next_word(),
+                        _ => unreachable!(),
+                    }
+                    self.pending_escape.clear();
+                    self.escape_started = None;
+                } else if !PROMPT_KEYS.iter().any(|key| key.starts_with(&self.pending_escape)) {
+                    return (PromptResult::Cancel, bytes.len());
+                }
+                continue;
+            }
             match byte {
                 b'\r' | b'\n' => return (PromptResult::Commit, index + 1),
-                b'\x1b' | b'\x03' => return (PromptResult::Cancel, bytes.len()),
+                b'\x1b' => {
+                    self.pending_utf8.clear();
+                    self.pending_escape.push(byte);
+                    self.escape_started = Some(Instant::now());
+                }
+                b'\x03' => return (PromptResult::Cancel, bytes.len()),
                 b'\x08' | b'\x7f' => {
                     self.pending_utf8.clear();
-                    self.name.pop();
+                    if let Some((start, _)) = self.name[..self.cursor].char_indices().next_back() {
+                        self.name.drain(start..self.cursor);
+                        self.cursor = start;
+                    }
+                }
+                b'\x17' => {
+                    self.pending_utf8.clear();
+                    self.delete_previous_word();
                 }
                 b'\x15' => {
                     self.pending_utf8.clear();
                     self.name.clear();
+                    self.cursor = 0;
                 }
                 byte if byte.is_ascii_control() => self.pending_utf8.clear(),
-                byte if byte.is_ascii() => self.name.push(byte as char),
+                byte if byte.is_ascii() => {
+                    self.name.insert(self.cursor, byte as char);
+                    self.cursor += 1;
+                }
                 byte => self.push_utf8_byte(byte),
             }
         }
         (PromptResult::Editing, bytes.len())
+    }
+
+    fn previous_word(&self) -> usize {
+        self.name[..self.cursor]
+            .trim_end_matches(char::is_whitespace)
+            .trim_end_matches(|character: char| !character.is_whitespace())
+            .len()
+    }
+
+    fn delete_previous_word(&mut self) {
+        let start = self.previous_word();
+        self.name.drain(start..self.cursor);
+        self.cursor = start;
+    }
+
+    fn next_word(&self) -> usize {
+        let suffix = &self.name[self.cursor..];
+        let word_end = suffix.find(char::is_whitespace).unwrap_or(suffix.len());
+        let rest = &suffix[word_end..];
+        self.cursor + word_end + rest.len() - rest.trim_start_matches(char::is_whitespace).len()
     }
 
     fn push_utf8_byte(&mut self, byte: u8) {
@@ -102,7 +166,8 @@ impl RenamePrompt {
         match std::str::from_utf8(&self.pending_utf8) {
             Ok(character) => {
                 if !character.chars().any(char::is_control) {
-                    self.name.push_str(character);
+                    self.name.insert_str(self.cursor, character);
+                    self.cursor += character.len();
                 }
                 self.pending_utf8.clear();
             }
@@ -171,6 +236,13 @@ pub(crate) fn attach(
             let _ = write_frame(&mut server, 3, &[]);
             break;
         }
+        if rename_prompt.as_ref().is_some_and(|prompt: &RenamePrompt| {
+            prompt.escape_started.is_some_and(|started| started.elapsed() >= PROMPT_ESCAPE_TIMEOUT)
+        }) {
+            rename_prompt = None;
+            renderer.set_prompt(None);
+            renderer.draw(&mut output, last_size.0, last_size.1)?;
+        }
         if let Some(action) = input_decoder.expire(Instant::now()) {
             handle_input_action(
                 &mut server,
@@ -182,9 +254,12 @@ pub(crate) fn attach(
                 action,
             )?;
         }
-        let timeout = input_decoder
-            .remaining_timeout(Instant::now())
-            .map_or(100, |remaining| remaining.as_millis().clamp(1, 100) as i32);
+        let now = Instant::now();
+        let mut timeout = input_decoder.remaining_timeout(now).unwrap_or(Duration::from_millis(100));
+        if let Some(started) = rename_prompt.as_ref().and_then(|prompt| prompt.escape_started) {
+            timeout = timeout.min(PROMPT_ESCAPE_TIMEOUT.saturating_sub(now.duration_since(started)));
+        }
+        let timeout = timeout.as_millis().clamp(1, 100) as i32;
         let mut descriptors = [
             libc::pollfd {
                 fd: stdin_fd,
@@ -452,6 +527,29 @@ mod tests {
     }
 
     #[test]
+    fn rename_edits_words_at_unicode_cursor_boundaries() {
+        let mut prompt = RenamePrompt::new(7, "one 雪  three".into());
+        assert!(matches!(prompt.feed(b"\x1b[1;5D").0, PromptResult::Editing));
+        assert_eq!(&prompt.name[prompt.cursor..], "three");
+        assert!(matches!(prompt.feed(b"\x1b[").0, PromptResult::Editing));
+        assert!(matches!(prompt.feed(b"1;5D").0, PromptResult::Editing));
+        assert_eq!(&prompt.name[prompt.cursor..], "雪  three");
+        assert!(matches!(prompt.feed("山".as_bytes()).0, PromptResult::Editing));
+        assert_eq!(prompt.name, "one 山雪  three");
+        assert!(matches!(prompt.feed(b"\x1b[1;5C").0, PromptResult::Editing));
+        assert_eq!(&prompt.name[prompt.cursor..], "three");
+        assert!(matches!(prompt.feed(b"\x1b").0, PromptResult::Editing));
+        assert!(matches!(prompt.feed(b"\x7f").0, PromptResult::Editing));
+        assert_eq!(prompt.name, "one three");
+        assert_eq!(prompt.cursor, 4);
+        assert!(matches!(prompt.feed(b"\x17").0, PromptResult::Editing));
+        assert_eq!(prompt.name, "three");
+        assert_eq!(prompt.cursor, 0);
+        assert!(matches!(prompt.feed(b"\x1b\x7f").0, PromptResult::Editing));
+        assert_eq!(prompt.name, "three");
+    }
+
+    #[test]
     fn ctrl_r_commits_the_name_without_forwarding_prompt_text() {
         let (mut client, mut peer) = UnixStream::pair().unwrap();
         let mut decoder = InputDecoder::default();
@@ -546,7 +644,7 @@ mod tests {
             &mut renderer,
             &mut prompt,
             &mut output,
-            b"not-a-command\x1b",
+            b"not-a-command\x1bx",
         );
 
         peer.set_nonblocking(true).unwrap();

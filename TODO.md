@@ -2,7 +2,6 @@
 
 - [ ] TODO: Revisit headless session input when a concrete need arises [headless_session_input](#headless_session_input)
 - [ ] TODO: Add per-window Vim mode matching st [vim_mode](#vim_mode)
-- [ ] TODO: Add word editing to buffer rename [rename_word_editing](#rename_word_editing)
 - [ ] TODO: Add configurable per-window borders and gaps [window_borders](#window_borders)
 - [ ] TODO: Investigate OMP crash on resize [omp_resize_crash](#omp_resize_crash)
 
@@ -15,10 +14,6 @@ Deferred idea only: do not implement now. Revisit if a concrete workflow require
 ## vim_mode
 
 Add Vim-style scrollback navigation to the focused rmux window. Match the dotFiles st-meta-vim-full patch as closely as practical: mode entry and exit, Alt-D/F scrolling, motions and counts, smart-case search and highlighting, selection, clipboard yank, and visual feedback. Keep navigation and selection local to each rmux window, even when multiple windows show the same buffer, rather than applying them to the whole terminal. Use the dynamic st keybinding control to disable outer st Vim bindings while rmux is attached and restore the previous state on exit. Compare the same scenarios in plain st and rmux, and document intentional differences.
-
-## rename_word_editing
-
-In the buffer rename prompt, make Ctrl-Backspace delete the preceding word without leaving rename mode. Support Ctrl-Left and Ctrl-Right to move the cursor between words while editing the name.
 
 ## window_borders
 
@@ -203,6 +198,8 @@ The user reported that the crash no longer reproduces after updating rmux from 0
   - [x] DONE: Document user configuration [config_docs](#config_docs)
 - [x] DONE: Configure buffer-line prefixes and suffixes [buffer_line_markers](#buffer_line_markers)
 - [x] DONE: Investigate OMP multiline paste submission [omp_paste_submission](#omp_paste_submission)
+
+- [x] DONE: Add word editing to buffer rename [rename_word_editing](#rename_word_editing)
 ## rmux
 
 - Role: material
@@ -1296,4 +1293,8 @@ Allow independent prefix and suffix characters for buffer names in each buffer-l
 ## omp_paste_submission
 
 When OMP runs inside rmux, pasting multiline text with Ctrl+Shift+V can submit lines as separate messages without pressing Enter, causing the agent to start before receiving the full input. The reported example was a paragraph with a trailing newline. Outside rmux, the same paste remains in the chat input without submission. Reproduce the difference, identify and fix the underlying input-handling issue, and verify that multiline and trailing-newline pastes remain intact without being sent until explicitly submitted.
+
+## rename_word_editing
+
+In the buffer rename prompt, make Ctrl-Backspace delete the preceding word without leaving rename mode. Support Ctrl-Left and Ctrl-Right to move the cursor between words while editing the name.
 
