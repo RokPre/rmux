@@ -39,6 +39,8 @@ rmux up NAME [--cwd DIRECTORY] [-- COMMAND [ARG...]]
 rmux attach NAME
 rmux ls
 rmux kill NAME
+rmux --version
+rmux -v
 ```
 
 `new` creates a session and attaches; it fails if the name already exists. `up` creates the session if needed, otherwise attaches to it. `attach` requires an existing session. Without a command, a new session starts the user's interactive shell. When creating a session, `--cwd` selects its working directory; `-- COMMAND ...` runs a specific program instead.

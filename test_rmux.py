@@ -166,6 +166,18 @@ class Sessions(unittest.TestCase):
             time.sleep(0.03)
         self.fail('timed out waiting for session state')
 
+    def test_version_flags(self):
+        import tomllib
+
+        with Path(__file__).with_name('Cargo.toml').open('rb') as file:
+            version = tomllib.load(file)['package']['version']
+        for flag in ('--version', '-v'):
+            with self.subTest(flag=flag):
+                result = self.run_rmux(flag)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, f'rmux {version}\n')
+                self.assertEqual(result.stderr, '')
+
     def test_lifecycle_and_up(self):
         marker = Path(self.tmp.name, 'marker')
         command = f'printf "%s\\n" "$$:$PWD:$1" >> {marker}; exec sh -i'

@@ -138,6 +138,9 @@
       - [x] DONE: Document the supported keyboard controls and conflicts [document_controls](#document_controls)
       - [x] DONE: Document session, buffer and window lifetime behavior [document_lifecycle](#document_lifecycle)
       - [x] DONE: Document shared attachments and buffer sizing [document_views](#document_views)
+
+- [x] DONE: Add --version and -v flags [version_flags](#version_flags)
+
 ## rmux
 
 - Role: material
@@ -1053,3 +1056,6 @@ Atuin interactive history search previously timed out because the rmux buffer te
 
 The user reported that the first uncolored text appeared gray after the buffer line. Fixed a renderer ordering bug that reset the first pane cell after setting its colors. A color-enabled regression test verifies the first colored cell and subsequent default-colored cell. The user opened a fresh session through Super+Ctrl+T, cleared the screen, and confirmed the color was correct.
 
+## version_flags
+
+Implement --version and -v so either flag prints the installed rmux version. Use Semantic Versioning (https://semver.org/): increment MAJOR for incompatible changes, MINOR for backward-compatible functionality, and PATCH for backward-compatible bug fixes. During initial development (0.y.z), the public interface is not considered stable.

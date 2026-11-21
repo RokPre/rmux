@@ -57,6 +57,11 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         return Ok(());
     }
 
+    if args.len() == 1 && (args[0] == "--version" || args[0] == "-v") {
+        println!("rmux {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let (mode, name, cwd, command) = parse_args(&args)?;
     let paths = SessionPaths::new().map_err(|error| error.to_string())?;
 
