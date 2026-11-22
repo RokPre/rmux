@@ -3,7 +3,6 @@
 - [ ] TODO: Revisit headless session input when a concrete need arises [headless_session_input](#headless_session_input)
 - [ ] TODO: Add per-window Vim mode matching st [vim_mode](#vim_mode)
 - [ ] TODO: Add configurable per-window borders and gaps [window_borders](#window_borders)
-- [ ] TODO: Investigate OMP crash on resize [omp_resize_crash](#omp_resize_crash)
 
 ## headless_session_input
 
@@ -21,12 +20,6 @@ Add Vim-style scrollback navigation to the focused rmux window. Match the dotFil
 - Dependency: configuration
 
 Add optional individual borders around rmux windows, with configurable characters and distinct focused and unfocused colors, plus configurable gaps between adjacent borders or dividers. Preserve the existing single-divider layout as the default. Ensure borders and gaps are reflected consistently in rendering and shared buffer sizing, including small windows and multiple differently sized clients. Revisit and update border configuration when the implementation is designed.
-
-## omp_resize_crash
-
-Reproduce and investigate the reported crash when resizing with OMP running inside rmux. Determine which process crashes and identify the cause; excessive redraw output or an overflow is a hypothesis, not a confirmed diagnosis. Fix the underlying issue and verify that OMP remains usable across resizes.
-
-The user reported that the crash no longer reproduces after updating rmux from 0.2.0 to 0.4.0. Missing cursor-position replies in 0.2.0 are a suspected cause, but this has not been confirmed.
 
 # DONEs
 
@@ -200,6 +193,8 @@ The user reported that the crash no longer reproduces after updating rmux from 0
 - [x] DONE: Investigate OMP multiline paste submission [omp_paste_submission](#omp_paste_submission)
 
 - [x] DONE: Add word editing to buffer rename [rename_word_editing](#rename_word_editing)
+
+- [x] DONE: Investigate OMP crash on resize [omp_resize_crash](#omp_resize_crash)
 ## rmux
 
 - Role: material
@@ -1297,4 +1292,10 @@ When OMP runs inside rmux, pasting multiline text with Ctrl+Shift+V can submit l
 ## rename_word_editing
 
 In the buffer rename prompt, make Ctrl-Backspace delete the preceding word without leaving rename mode. Support Ctrl-Left and Ctrl-Right to move the cursor between words while editing the name.
+
+## omp_resize_crash
+
+Fix the rmux client disconnect reported during repeated st floating-mode toggles and when resuming a busy OMP session. Diagnostic logs captured the server disconnecting the client because its 64-message output queue filled; the rmux server and OMP process remained alive. Prevent output bursts from disconnecting clients while preserving terminal output and session responsiveness, and verify resizing and busy OMP sessions.
+
+The user previously observed the problem with one OMP session and more often with two. Missing cursor-position replies were an earlier unconfirmed hypothesis.
 

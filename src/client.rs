@@ -205,6 +205,7 @@ pub(crate) fn attach(
 
     let _raw_mode = RawMode::enable()?;
     let _terminal_screen = TerminalScreen::enter()?;
+    crate::debug_log(format_args!("client connected session={name} size={cols}x{rows}"));
     writer.set_read_timeout(None)?;
     writer.set_write_timeout(None)?;
     let mut server = reader.into_inner();
@@ -233,6 +234,7 @@ pub(crate) fn attach(
 
     loop {
         if interrupted.load(Ordering::Acquire) {
+            crate::debug_log(format_args!("client interrupted session={name}"));
             let _ = write_frame(&mut server, 3, &[]);
             break;
         }
@@ -285,6 +287,7 @@ pub(crate) fn attach(
         if descriptors[0].revents & libc::POLLIN != 0 {
             let length = input.read(&mut input_buffer)?;
             if length == 0 {
+                crate::debug_log(format_args!("client terminal input closed session={name}"));
                 let _ = write_frame(&mut server, 3, &[]);
                 break;
             }
@@ -321,7 +324,14 @@ pub(crate) fn attach(
                     }
                     renderer.draw(&mut output, last_size.0, last_size.1)?;
                 }
-                Some((CLOSE, _)) | None => break,
+                Some((CLOSE, _)) => {
+                    crate::debug_log(format_args!("client received close session={name}"));
+                    break;
+                }
+                None => {
+                    crate::debug_log(format_args!("client server connection closed session={name}"));
+                    break;
+                }
                 Some(_) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -331,6 +341,7 @@ pub(crate) fn attach(
             }
         }
         if descriptors[1].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+            crate::debug_log(format_args!("client server poll closed session={name} revents={}", descriptors[1].revents));
             break;
         }
 
@@ -338,6 +349,7 @@ pub(crate) fn attach(
             last_resize_check = Instant::now();
             let size = terminal_size();
             if size != last_size {
+                crate::debug_log(format_args!("client terminal resize session={name} size={}x{}", size.0, size.1));
                 let mut payload = Vec::with_capacity(4);
                 payload.extend_from_slice(&size.1.max(1).to_be_bytes());
                 payload.extend_from_slice(&size.0.max(1).to_be_bytes());

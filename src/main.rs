@@ -14,6 +14,19 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+pub(crate) fn debug_log(message: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let Some(path) = env::var_os("RMUX_DEBUG_LOG") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
+        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let _ = writeln!(file, "{}.{:03} pid={} {message}", timestamp.as_secs(), timestamp.subsec_millis(), std::process::id());
+    }
+}
 const USAGE: &str = "usage: rmux {new|up} NAME [--cwd DIRECTORY] [-- COMMAND [ARG...]] | rmux {attach|kill} NAME | rmux ls";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,6 +63,7 @@ pub(crate) struct Response {
 
 fn main() {
     if let Err(error) = run(env::args_os().skip(1).collect()) {
+        debug_log(format_args!("process error: {error}"));
         eprintln!("rmux: {error}");
         std::process::exit(1);
     }
@@ -217,11 +231,20 @@ fn start_server(
     }
 
     use std::os::unix::process::CommandExt;
+    let stderr = if let Some(path) = env::var_os("RMUX_DEBUG_LOG") {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)
+            .map_err(|error| format!("could not open RMUX_DEBUG_LOG: {error}"))?;
+        server.env("RUST_BACKTRACE", "1");
+        Stdio::from(file)
+    } else {
+        Stdio::null()
+    };
     server
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     let mut child = server
         .spawn()
         .map_err(|error| format!("could not create session: {error}"))?;

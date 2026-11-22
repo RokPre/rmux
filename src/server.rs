@@ -6,7 +6,7 @@ use std::num::NonZeroU16;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -46,6 +46,7 @@ pub(crate) enum Outgoing {
     BufferSnapshot(Vec<u8>),
     BufferOutput(Vec<u8>),
     Layout(Vec<u8>),
+    Refresh,
     Close,
 }
 
@@ -55,6 +56,8 @@ struct Client {
     rows: u16,
     cols: u16,
     resize_step: u8,
+    snapshot_only: Arc<AtomicBool>,
+    refresh_pending: Arc<AtomicBool>,
 }
 
 struct Buffer {
@@ -153,6 +156,7 @@ pub(crate) fn run_server(args: &[std::ffi::OsString]) -> io::Result<()> {
         next_client: AtomicU64::new(1),
         shutdown: std::sync::atomic::AtomicBool::new(false),
     });
+    crate::debug_log(format_args!("server started session={name}"));
     spawn_output_reader(reader, Arc::clone(&session), 1);
 
     loop {
@@ -164,7 +168,9 @@ pub(crate) fn run_server(args: &[std::ffi::OsString]) -> io::Result<()> {
             Ok((stream, _)) => {
                 let session = Arc::clone(&session);
                 thread::spawn(move || {
-                    let _ = handle_client(stream, session);
+                    if let Err(error) = handle_client(stream, session) {
+                        crate::debug_log(format_args!("client handler error: {error}"));
+                    }
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -320,6 +326,21 @@ fn active_buffer(state: &SessionState) -> Option<u64> {
 fn broadcast(state: &mut SessionState, message: Outgoing) {
     let mut disconnected = Vec::new();
     for (&id, client) in &state.clients {
+        if client.snapshot_only.load(Ordering::Acquire) {
+            if matches!(message, Outgoing::Close) {
+                if let Err(TrySendError::Disconnected(_)) =
+                    client.sender.try_send(Outgoing::Close)
+                {
+                    disconnected.push(id);
+                }
+            } else if !client.refresh_pending.swap(true, Ordering::AcqRel) {
+                match client.sender.try_send(Outgoing::Refresh) {
+                    Ok(()) | Err(TrySendError::Full(_)) => {}
+                    Err(TrySendError::Disconnected(_)) => disconnected.push(id),
+                }
+            }
+            continue;
+        }
         let result = match &message {
             Outgoing::BufferSnapshot(bytes) => client
                 .sender
@@ -328,21 +349,22 @@ fn broadcast(state: &mut SessionState, message: Outgoing) {
                 .sender
                 .try_send(Outgoing::BufferOutput(bytes.clone())),
             Outgoing::Layout(bytes) => client.sender.try_send(Outgoing::Layout(bytes.clone())),
+            Outgoing::Refresh => client.sender.try_send(Outgoing::Refresh),
             Outgoing::Close => client.sender.try_send(Outgoing::Close),
         };
         match result {
             Ok(()) | Err(TrySendError::Disconnected(_)) => {}
-            Err(TrySendError::Full(_)) => disconnected.push(id),
+            Err(TrySendError::Full(_)) => {
+                client.snapshot_only.store(true, Ordering::Release);
+                client.refresh_pending.store(false, Ordering::Release);
+                crate::debug_log(format_args!(
+                    "client switched to snapshot-only client={id}"
+                ));
+            }
         }
     }
-    let removed_clients = !disconnected.is_empty();
     for id in disconnected {
-        if let Some(client) = state.clients.remove(&id) {
-            let _ = client.stream.shutdown(std::net::Shutdown::Both);
-        }
-    }
-    if removed_clients {
-        resize_visible_buffers(state);
+        state.clients.remove(&id);
     }
 }
 
@@ -385,7 +407,10 @@ fn attach_client(
     let rows = request.rows.max(1);
     let cols = request.cols.max(1);
     let id = session.next_client.fetch_add(1, Ordering::Relaxed);
+    crate::debug_log(format_args!("client attached session={} client={id} size={cols}x{rows}", session.name));
     let (sender, receiver) = mpsc::sync_channel(64);
+    let snapshot_only = Arc::new(AtomicBool::new(false));
+    let refresh_pending = Arc::new(AtomicBool::new(false));
     let output_stream = stream.try_clone()?;
     write_response(&stream, &identity_response(&session.name))?;
 
@@ -399,17 +424,34 @@ fn attach_client(
                 rows,
                 cols,
                 resize_step: request.resize_step.clamp(1, 50),
+                snapshot_only: Arc::clone(&snapshot_only),
+                refresh_pending: Arc::clone(&refresh_pending),
             },
         );
         resize_visible_buffers(&mut state);
         send_layout_to_client(&mut state, id);
         send_visible_buffer_snapshots(&mut state);
     }
-    thread::spawn(move || output_loop(output_stream, receiver));
+    let output_session = Arc::clone(&session);
+    thread::spawn(move || {
+        output_loop(
+            output_stream,
+            receiver,
+            output_session,
+            id,
+            snapshot_only,
+            refresh_pending,
+        )
+    });
 
     loop {
-        let Some((kind, payload)) = read_frame(&mut reader)? else {
-            break;
+        let (kind, payload) = match read_frame(&mut reader) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break,
+            Err(error) => {
+                crate::debug_log(format_args!("client read error client={id}: {error}"));
+                break;
+            }
         };
         match kind {
             INPUT => {
@@ -428,6 +470,7 @@ fn attach_client(
                 if let Some(client) = state.clients.get_mut(&id) {
                     client.rows = u16::from_be_bytes([payload[0], payload[1]]).max(1);
                     client.cols = u16::from_be_bytes([payload[2], payload[3]]).max(1);
+                    crate::debug_log(format_args!("client resize client={id} size={}x{}", client.cols, client.rows));
                 }
                 resize_visible_buffers(&mut state);
                 send_visible_buffer_snapshots(&mut state);
@@ -458,6 +501,7 @@ fn attach_client(
     }
 
     {
+        crate::debug_log(format_args!("client detach session={} client={id}", session.name));
         let mut state = lock_state(&session);
         if let Some(client) = state.clients.remove(&id) {
             let _ = client.stream.shutdown(std::net::Shutdown::Both);
@@ -762,7 +806,8 @@ fn reap_exited_buffers(session: &Session) -> io::Result<bool> {
     let mut state = lock_state(session);
     let mut exited = Vec::new();
     for (&id, buffer) in &mut state.buffers {
-        if buffer.child.try_wait().map_err(io::Error::other)?.is_some() {
+        if let Some(status) = buffer.child.try_wait().map_err(io::Error::other)? {
+            crate::debug_log(format_args!("buffer exited session={} buffer={id} status={status:?}", session.name));
             exited.push(id);
         }
     }
@@ -802,31 +847,143 @@ fn reap_exited_buffers(session: &Session) -> io::Result<bool> {
     Ok(false)
 }
 
-fn output_loop(mut stream: UnixStream, receiver: mpsc::Receiver<Outgoing>) {
-    while let Ok(message) = receiver.recv() {
-        match message {
-            Outgoing::BufferSnapshot(bytes) => {
-                if write_frame(&mut stream, BUFFER_SNAPSHOT, &bytes).is_err() {
-                    break;
-                }
-            }
-            Outgoing::BufferOutput(bytes) => {
-                if write_frame(&mut stream, BUFFER_OUTPUT, &bytes).is_err() {
-                    break;
-                }
-            }
-            Outgoing::Layout(snapshot) => {
-                if write_frame(&mut stream, WINDOW_STATE, &snapshot).is_err() {
-                    break;
-                }
-            }
-            Outgoing::Close => {
-                let _ = write_frame(&mut stream, CLOSE, &[]);
+fn output_loop(
+    mut stream: UnixStream,
+    receiver: mpsc::Receiver<Outgoing>,
+    session: Arc<Session>,
+    id: u64,
+    snapshot_only: Arc<AtomicBool>,
+    refresh_pending: Arc<AtomicBool>,
+) {
+    loop {
+        let message = match receiver.recv() {
+            Ok(message) => message,
+            Err(_) => break,
+        };
+        if matches!(message, Outgoing::Close) {
+            let _ = write_frame(&mut stream, CLOSE, &[]);
+            break;
+        }
+        if snapshot_only.load(Ordering::Acquire) {
+            if write_recovery_snapshot(
+                &mut stream,
+                &receiver,
+                &session,
+                id,
+                &refresh_pending,
+            )
+            .is_err()
+            {
                 break;
             }
+            continue;
+        }
+        if write_message(&mut stream, message).is_err() {
+            break;
+        }
+        if snapshot_only.load(Ordering::Acquire)
+            && write_recovery_snapshot(
+                &mut stream,
+                &receiver,
+                &session,
+                id,
+                &refresh_pending,
+            )
+            .is_err()
+        {
+            break;
         }
     }
     let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+fn write_message(stream: &mut UnixStream, message: Outgoing) -> io::Result<()> {
+    match message {
+        Outgoing::BufferSnapshot(bytes) => write_frame(stream, BUFFER_SNAPSHOT, &bytes),
+        Outgoing::BufferOutput(bytes) => write_frame(stream, BUFFER_OUTPUT, &bytes),
+        Outgoing::Layout(snapshot) => write_frame(stream, WINDOW_STATE, &snapshot),
+        Outgoing::Refresh => Ok(()),
+        Outgoing::Close => write_frame(stream, CLOSE, &[]),
+    }
+}
+
+fn write_recovery_snapshot(
+    stream: &mut UnixStream,
+    receiver: &mpsc::Receiver<Outgoing>,
+    session: &Session,
+    id: u64,
+    refresh_pending: &AtomicBool,
+) -> io::Result<()> {
+    loop {
+        let snapshots = {
+            let state = lock_state(session);
+            while receiver.try_recv().is_ok() {}
+            refresh_pending.store(false, Ordering::Release);
+            recovery_snapshot(&state)
+        };
+        for message in snapshots {
+            write_message(stream, message)?;
+        }
+
+        match receiver.try_recv() {
+            Ok(Outgoing::Close) => return write_frame(stream, CLOSE, &[]),
+            Ok(_) => {
+                refresh_pending.store(false, Ordering::Release);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                if refresh_pending.load(Ordering::Acquire) {
+                    continue;
+                }
+                return Ok(());
+            }
+            Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+        }
+        if !lock_state(session).clients.contains_key(&id) {
+            return Ok(());
+        }
+    }
+}
+
+fn recovery_snapshot(state: &SessionState) -> Vec<Outgoing> {
+    let mut messages = vec![Outgoing::Layout(
+        state.layout.snapshot(&state.order, &state.buffer_names),
+    )];
+    let mut seen = HashSet::new();
+    for id in state.layout.visible_buffer_ids() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(buffer) = state.buffers.get(&id) else {
+            continue;
+        };
+        let screen = buffer.parser.screen();
+        let (rows, cols) = screen.size();
+        let mut contents = screen.state_formatted().into_bytes();
+        if screen.bracketed_paste() {
+            contents.extend_from_slice(b"\x1b[?2004h");
+        }
+        let mut offset = 0;
+        let mut first = true;
+        loop {
+            let end = (offset + MAX_FRAME - 12).min(contents.len());
+            let mut payload = Vec::with_capacity(12 + end - offset);
+            payload.extend_from_slice(&id.to_be_bytes());
+            payload.extend_from_slice(&rows.get().to_be_bytes());
+            payload.extend_from_slice(&cols.get().to_be_bytes());
+            payload.extend_from_slice(&contents[offset..end]);
+            messages.push(if first {
+                Outgoing::BufferSnapshot(payload)
+            } else {
+                Outgoing::BufferOutput(payload)
+            });
+            if end == contents.len() {
+                break;
+            }
+            offset = end;
+            first = false;
+        }
+    }
+    messages
 }
 
 fn close_clients(state: &mut SessionState) {

@@ -111,6 +111,78 @@ class Sessions(unittest.TestCase):
         ).start()
         return process, master
 
+    def test_opt_in_resize_diagnostics_record_lifecycle_without_input(self):
+        log = Path(self.tmp.name, 'debug.log')
+        self.env['RMUX_DEBUG_LOG'] = str(log)
+        self.start('new', 'diagnostic', '--', 'sh', '-c', 'sleep 1; exit 7')
+        self.wait_for(lambda: self.run_rmux('ls').stdout == 'diagnostic\n')
+        control = self.attach_control('diagnostic')
+        try:
+            self.read_layout(control)
+            self.send_frame(control, CLIENT_RESIZE, (20).to_bytes(2, 'big') + (70).to_bytes(2, 'big'))
+            self.wait_for(lambda: log.exists() and 'size=70x20' in log.read_text())
+        finally:
+            control.close()
+        self.wait_for(lambda: 'buffer exited session=diagnostic' in log.read_text())
+        contents = log.read_text()
+        self.assertIn('server started session=diagnostic', contents)
+        self.assertIn('client attached session=diagnostic', contents)
+        self.assertIn('status=', contents)
+        self.assertNotIn('sleep 1; exit 7', contents)
+
+    def test_slow_client_recovers_without_blocking_other_clients(self):
+        log = Path(self.tmp.name, 'debug.log')
+        trigger = Path(self.tmp.name, 'start-output')
+        self.env['RMUX_DEBUG_LOG'] = str(log)
+        command = (
+            'import os,time\n'
+            f'while not os.path.exists({str(trigger)!r}): time.sleep(0.01)\n'
+            'os.write(1, b"x" * 8000000)\n'
+            'os.write(1, b"\\x1b[2J\\x1b[H\\x1b[31")\n'
+            'time.sleep(0.2)\n'
+            'os.write(1, b"mRECOVEREDMARK\\x1b[0m")\n'
+            'time.sleep(30)\n'
+        )
+        self.start('new', 'slow-client', '--', 'python3', '-c', command)
+        self.wait_for(lambda: self.run_rmux('ls').stdout == 'slow-client\n')
+        slow = self.attach_control('slow-client')
+        healthy = None
+        try:
+            self.read_layout(slow)
+            healthy = self.attach_control('slow-client')
+            self.read_layout(healthy)
+            trigger.touch()
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline:
+                if 'client switched to snapshot-only client=2' in log.read_text():
+                    break
+                time.sleep(0.05)
+            self.assertIn('client switched to snapshot-only client=2', log.read_text())
+            self.send_frame(slow, CLIENT_RESIZE, (20).to_bytes(2, 'big') + (70).to_bytes(2, 'big'))
+            self.wait_for(lambda: 'client resize client=2 size=70x20' in log.read_text())
+
+            self.send_frame(healthy, RENAME_BUFFER, (1).to_bytes(8, 'big') + b'responsive')
+            while self.read_layout(healthy)['buffer_names']['1'] != 'responsive':
+                pass
+
+            while True:
+                kind, payload = self.read_frame(slow)
+                self.assertNotEqual(kind, CLOSE)
+                if kind == BUFFER_SNAPSHOT and b'RECOVEREDMARK' in payload[12:]:
+                    self.assertEqual(int.from_bytes(payload[8:10], 'big'), 19)
+                    self.assertEqual(int.from_bytes(payload[10:12], 'big'), 70)
+                    break
+            self.send_frame(healthy, RENAME_BUFFER, (1).to_bytes(8, 'big') + b'after-recovery')
+            while True:
+                kind, payload = self.read_frame(slow)
+                self.assertNotEqual(kind, CLOSE)
+                if kind == WINDOW_STATE and json.loads(payload)['buffer_names']['1'] == 'after-recovery':
+                    break
+        finally:
+            slow.close()
+            if healthy is not None:
+                healthy.close()
+
     def test_bracketed_paste_reaches_application_unchanged(self):
         payload = b'\x1b[200~first line\nsecond\x14 line\n\x1b[201~'
         received = Path(self.tmp.name, 'paste')
