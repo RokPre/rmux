@@ -1,20 +1,20 @@
 # TODOs
 
 - [ ] TODO: Revisit headless session input when a concrete need arises [headless_session_input](#headless_session_input)
-- [ ] TODO: Add per-window Vim mode matching st [vim_mode](#vim_mode)
+- [ ] TODO: Add buffer-scoped Vim mode matching st [vim_mode](#vim_mode)
   - [ ] TODO: Establish terminal and OMP behavior [vim_research](#vim_research)
     - [ ] TODO: Catalog reference Vim interactions [vim_reference](#vim_reference)
     - [ ] TODO: Inspect the OMP re-render command [omp_replay](#omp_replay)
     - [ ] TODO: Trace OMP terminal output safely [omp_trace](#omp_trace)
     - [ ] TODO: Choose history and view representation [vim_history_design](#vim_history_design)
     - [ ] TODO: Choose application control mechanism [vim_control_design](#vim_control_design)
-  - [ ] TODO: Make history available to window views [vim_history](#vim_history)
+  - [ ] TODO: Make buffer history available for navigation [vim_history](#vim_history)
     - [ ] TODO: Retain 2,000 rows of buffer history [history_capacity](#history_capacity)
     - [ ] TODO: Expose historical buffer rows [history_access](#history_access)
-    - [ ] TODO: Maintain independent window viewports [history_views](#history_views)
+    - [ ] TODO: Maintain a shared buffer viewport [history_views](#history_views)
     - [ ] TODO: Handle history changes during navigation [history_lifecycle](#history_lifecycle)
-    - [ ] TODO: Verify window history behavior [history_verify](#history_verify)
-  - [ ] TODO: Implement window-local mode transitions [vim_transitions](#vim_transitions)
+    - [ ] TODO: Verify buffer history behavior [history_verify](#history_verify)
+  - [ ] TODO: Implement buffer-scoped mode transitions [vim_transitions](#vim_transitions)
     - [ ] TODO: Implement mode entry shortcuts [vim_entry](#vim_entry)
     - [ ] TODO: Implement Normal mode exits [vim_exit](#vim_exit)
     - [ ] TODO: Implement Visual mode entry [visual_entry](#visual_entry)
@@ -58,7 +58,7 @@ Deferred idea only: do not implement now. Revisit if a concrete workflow require
 - Difficulty: 2 kyu
 - Children: vim_research & vim_history & vim_transitions & vim_navigation & vim_search & vim_selection & vim_app_control & vim_acceptance
 
-Provide Vim-style navigation, search and selection scoped to each rmux window, following dotFiles st-meta-vim-full unless specified otherwise. Retain about 2,000 terminal history rows per buffer. Insert mode passes ordinary input through; Alt+Escape enters Normal, Alt+d/f enter and scroll, and Ctrl+f opens search. Normal Escape/i returns to Insert; v, V and Ctrl+v enter character, line and block Visual modes. Visual Escape clears selection and returns to Normal; y copies and returns to Insert. Search from Visual retains the selection; comma and semicolon navigate matches. Applications can disable rmux Vim bindings for their buffer, leaving window-management shortcuts available; Neovim integration restores them on exit. OMP should remain navigable. Test initially with st -V; dynamic st control is future work, not a dependency. Do not implement mouse yanks. Difficulty: coordinated changes to terminal history, input, rendering and application control; exact protocol and search interaction need investigation.
+Provide Vim-style navigation, search and selection scoped to the focused buffer, following dotFiles st-meta-vim-full unless specified otherwise. Share mode, navigation, search and selection state across windows and attached clients displaying the same buffer; different buffers remain independent. Retain about 2,000 terminal history rows per buffer. Dividers, borders, gaps and unused-space padding are display decorations, not buffer contents: exclude them from history, search, selection and copied text. Insert mode passes ordinary input through; Alt+Escape enters Normal, Alt+d/f enter and scroll, and Ctrl+f opens search. Normal Escape/i returns to Insert; v, V and Ctrl+v enter character, line and block Visual modes. Visual Escape clears selection and returns to Normal; y copies and returns to Insert. Search from Visual retains the selection; comma and semicolon navigate matches. Applications can disable rmux Vim bindings for their buffer, leaving window-management shortcuts available; Neovim integration restores them on exit. OMP should remain navigable. Test initially with st -V; dynamic st control is future work, not a dependency. Do not implement mouse yanks. Difficulty: coordinated changes to terminal history, input, rendering and application control; exact protocol and search interaction need investigation.
 
 ## window_borders
 
@@ -90,7 +90,7 @@ Use an isolated OMP session to observe normal output, replay, resize and alterna
 
 ## vim_history_design
 
-Decide how bounded buffer history, independent window views, live output, resize and replay interact using observed OMP behavior.
+Decide how bounded buffer history and shared buffer-scoped navigation interact with live output, resize and replay using observed OMP behavior. Keep rmux decorations outside buffer content.
 
 ## vim_control_design
 
@@ -103,7 +103,7 @@ Define buffer-targeted enable/disable and restoration semantics, including neste
 - Dependency: vim_history_design & omp_trace
 - Children: history_capacity & history_access & history_views & history_lifecycle & history_verify
 
-Retain bounded terminal history and provide independent views without changing shared live buffer state. Difficulty: resize, replay, alternate screens, concurrent output and multiple clients require careful handling. Depends on the history design and OMP observations.
+Retain bounded terminal history and provide one shared navigation view per buffer, rendered in every window and attached client displaying it, without disrupting live output processing. Keep dividers, borders, gaps and padding outside the history. Difficulty: resize, replay, alternate screens, concurrent output and multiple clients require careful handling. Depends on the history design and OMP observations.
 
 ## history_capacity
 
@@ -111,11 +111,11 @@ Set the agreed approximate 2,000-row bound and define how overflow evicts old ro
 
 ## history_access
 
-Provide historical terminal cells to a window view while preserving attributes and the live screen.
+Provide historical terminal cells for buffer navigation while preserving attributes and the live screen; exclude rmux decorations.
 
 ## history_views
 
-Store navigation positions per window, including when multiple windows show one buffer.
+Store one navigation position per buffer, shared across its windows and attached clients; keep different buffers independent.
 
 ## history_lifecycle
 
@@ -123,7 +123,7 @@ Keep view positions and selections valid through output, eviction, reset, replay
 
 ## history_verify
 
-Test bounds, isolation, attach, live output, resize, resets and OMP replay as applicable.
+Test bounds, shared views across windows and attached clients, isolation between buffers, differently sized windows, attach, live output, resize, resets and OMP replay as applicable. Verify decorations never enter history.
 
 ## vim_transitions
 
@@ -132,7 +132,7 @@ Test bounds, isolation, attach, live output, resize, resets and OMP replay as ap
 - Dependency: vim_history_design & vim_control_design
 - Children: vim_entry & vim_exit & visual_entry & visual_escape & transitions_verify
 
-Handle Insert, Normal and the three Visual modes without intercepting application input in Insert mode except agreed entry bindings. Difficulty: state and input routing must be isolated from shared buffers. Depends on the view representation and application-control design.
+Handle Insert, Normal and the three Visual modes per buffer without intercepting application input in Insert mode except agreed entry bindings. Share mode state between windows and attached clients displaying the same buffer, while keeping different buffers independent. Difficulty: state and input routing must remain consistent across clients. Depends on the view representation and application-control design.
 
 ## vim_entry
 
@@ -152,7 +152,7 @@ Clear the selection and return to Normal on Escape.
 
 ## transitions_verify
 
-Test each agreed transition, per-window isolation and unbound application input.
+Test each agreed transition, shared state across windows and clients, isolation between buffers and unbound application input.
 
 ## vim_navigation
 
@@ -161,11 +161,11 @@ Test each agreed transition, per-window isolation and unbound application input.
 - Dependency: history_views & transitions_verify & vim_reference
 - Children: vim_motions & vim_scrolling & vim_feedback & navigation_verify
 
-Reproduce relevant st motions, counts, scrolling and cursor feedback in a window-local history view. Difficulty: movement across history, wrapped rows and resize must remain consistent. Depends on history access and mode transitions.
+Reproduce relevant st motions, counts, scrolling and cursor feedback in a shared buffer history view. Difficulty: movement across history, wrapped rows and resize must remain consistent. Depends on history access and mode transitions.
 
 ## vim_motions
 
-Implement reference movement commands and numeric counts over window history.
+Implement reference movement commands and numeric counts over buffer history.
 
 ## vim_scrolling
 
@@ -173,11 +173,11 @@ Implement reference scrolling commands and keep the navigation cursor visible.
 
 ## vim_feedback
 
-Render the navigation cursor and mode feedback without affecting other windows.
+Render the shared navigation cursor and mode feedback in windows displaying the buffer without affecting different buffers.
 
 ## navigation_verify
 
-Test motions, counts, scroll bounds, focus and independent views.
+Test motions, counts, scroll bounds, focus, shared buffer views across windows and attached clients, and isolation between buffers.
 
 ## vim_search
 
@@ -186,7 +186,7 @@ Test motions, counts, scroll bounds, focus and independent views.
 - Dependency: navigation_verify & vim_reference
 - Children: search_visual_design & search_prompt & search_matches & search_verify
 
-Reproduce reference search and highlighting while preserving the originating Normal or Visual context. Difficulty: Visual search interaction needs explicit design. Depends on navigation and the reference behavior catalog.
+Reproduce reference search and highlighting in buffer content, sharing search state across views of the same buffer while preserving the originating Normal or Visual context. Exclude dividers, borders, gaps and padding from search. Difficulty: Visual search interaction needs explicit design. Depends on navigation and the reference behavior catalog.
 
 ## search_visual_design
 
@@ -202,7 +202,7 @@ Implement incremental smart-case search, match highlighting, comma forward and s
 
 ## search_verify
 
-Test case sensitivity, both directions, no matches, prompt transitions, isolation and Visual selection retention.
+Test case sensitivity, both directions, no matches, prompt transitions, shared state across views, isolation between buffers, decoration exclusion and Visual selection retention.
 
 ## vim_selection
 
@@ -211,7 +211,7 @@ Test case sensitivity, both directions, no matches, prompt transitions, isolatio
 - Dependency: navigation_verify & visual_entry
 - Children: selection_ranges & selection_render & selection_yank & selection_verify
 
-Select and copy only the focused window buffer, with character, line and rectangular shapes and reference-style feedback. Difficulty: terminal cells, wide characters and line boundaries affect copied text. Depends on navigation and Visual entry.
+Select and copy only the focused buffer content, with character, line and rectangular shapes and reference-style feedback. Share selection across windows and clients displaying that buffer; exclude dividers, borders, gaps and padding. Difficulty: terminal cells, wide characters and line boundaries affect copied text. Depends on navigation and Visual entry.
 
 ## selection_ranges
 
@@ -219,7 +219,7 @@ Track character, whole-line and rectangular selection from anchor to cursor.
 
 ## selection_render
 
-Highlight the selected cells only in the active window.
+Highlight selected buffer cells in every window displaying that buffer, without highlighting decorations or different buffers.
 
 ## selection_yank
 
@@ -227,7 +227,7 @@ Yank the selected text to the clipboard, provide feedback and return to Insert.
 
 ## selection_verify
 
-Test each shape, reversed endpoints, text boundaries, clipboard content and window isolation.
+Test each shape, reversed endpoints, text boundaries, clipboard content, shared selection across windows and clients, and isolation between buffers. Verify differently sized windows and scrolling never select or copy dividers, borders, gaps or padding.
 
 ## vim_app_control
 
@@ -273,7 +273,7 @@ Confirm Neovim receives its bindings while OMP remains navigable in another buff
 
 ## vim_docs
 
-Document bindings, 2,000-row history, application control, st -V setup and intentional differences from st.
+Document bindings, 2,000-row history, shared buffer-scoped navigation and selection, application control, st -V setup and intentional differences from st.
 
 # DONEs
 
