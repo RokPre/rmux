@@ -2,14 +2,14 @@
 
 - [ ] TODO: Revisit headless session input when a concrete need arises [headless_session_input](#headless_session_input)
 - [ ] TODO: Add buffer-scoped Vim mode matching st [vim_mode](#vim_mode)
-  - [ ] TODO: Establish terminal and OMP behavior [vim_research](#vim_research)
-    - [ ] TODO: Investigate reference and OMP behavior [vim_observe](#vim_observe)
-      - [ ] TODO: Catalog reference Vim interactions [vim_reference](#vim_reference)
-      - [ ] TODO: Inspect the OMP re-render command [omp_replay](#omp_replay)
-      - [ ] TODO: Trace OMP terminal output safely [omp_trace](#omp_trace)
-    - [ ] TODO: Choose history and control designs [vim_design](#vim_design)
-      - [ ] TODO: Choose history and view representation [vim_history_design](#vim_history_design)
-      - [ ] TODO: Choose application control mechanism [vim_control_design](#vim_control_design)
+  - [x] TODO: Establish terminal and OMP behavior [vim_research](#vim_research)
+    - [x] TODO: Investigate reference and OMP behavior [vim_observe](#vim_observe)
+      - [x] TODO: Catalog reference Vim interactions [vim_reference](#vim_reference)
+      - [x] TODO: Inspect the OMP re-render command [omp_replay](#omp_replay)
+      - [x] TODO: Trace OMP terminal output safely [omp_trace](#omp_trace)
+    - [x] TODO: Choose history and control designs [vim_design](#vim_design)
+      - [x] TODO: Choose history and view representation [vim_history_design](#vim_history_design)
+      - [x] TODO: Choose application control mechanism [vim_control_design](#vim_control_design)
   - [ ] TODO: Make buffer history available for navigation [vim_history](#vim_history)
     - [ ] TODO: Implement and verify buffer history [history_work](#history_work)
       - [ ] TODO: Retain 2,000 rows of buffer history [history_capacity](#history_capacity)
@@ -187,19 +187,19 @@ Investigate reference and OMP behavior. Scope: coordinate the listed tasks as on
 
 - Role: atomic
 
-Record st bindings, motions, counts, search, selection and visual feedback, distinguishing agreed differences.
+Inspected dotFiles/st-0.8.5/normalMode.c, config.h, st.c and x.c. Reference supports counted movement, word motions, search with smart case, comma/semicolon match movement, three Visual shapes, text-object yanks and clipboard feedback. Keep specified rmux differences, including buffer scope and no mouse yanks.
 
 ## omp_replay
 
 - Role: atomic
 
-Locate the user-provided re-render command and determine how it replays conversation output.
+The dotfiles OMP extension omp/agent/extensions/rerender.ts registers /rerender and calls ctx.reload(). An isolated --no-session PTY run emitted two CSI 3 J scrollback clears on /rerender, without entering the alternate screen; it exited normally.
 
 ## omp_trace
 
 - Role: atomic
 
-Use an isolated OMP session to observe normal output, replay, resize and alternate-screen sequences without touching active user sessions.
+Isolated --no-session OMP PTY runs exercised startup, resize, a synthetic shell-output transcript, /rerender and normal exit without touching active sessions. Resize temporarily entered and left the alternate screen and cleared scrollback; /rerender cleared scrollback and replayed the synthetic marker. A real chat remains required in OMP acceptance testing.
 
 ## vim_design
 
@@ -215,13 +215,13 @@ Choose history and control designs. Scope: coordinate the listed tasks as one re
 
 - Role: atomic
 
-Decide how bounded buffer history and shared buffer-scoped navigation interact with live output, resize and replay using observed OMP behavior. Keep rmux decorations outside buffer content.
+Keep the authoritative vt100 parser and approximately 2,000 scrollback rows in each server buffer. Maintain one navigation position per buffer, synchronized across clients and windows. Send historical snapshots separately from the live client parser, leaving live PTY output and terminal replies active. Clamp or rebase view and selection across eviction, resize, CSI 3 J replay and temporary alternate-screen transitions; exclude rmux decorations.
 
 ## vim_control_design
 
 - Role: atomic
 
-Define buffer-targeted enable/disable and restoration semantics, including nested applications and abnormal exit, based on available mechanisms.
+Applications send an OSC 777;rmux-app;acquire|release;PID request through their buffer PTY. The server tracks requesting process identities by PID and process start time, scopes each request to the originating buffer, prunes dead owners and leaves unrelated rmux shortcuts enabled. The Neovim hook acquires on entry and resume, and releases on suspend and exit; a remaining live owner keeps bindings disabled.
 
 ## history_work
 
