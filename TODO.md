@@ -43,7 +43,12 @@
     - [ ] TODO: Compare behavior with plain st [vim_compare](#vim_compare)
     - [ ] TODO: Verify OMP chat navigation [omp_acceptance](#omp_acceptance)
     - [ ] TODO: Verify Neovim and OMP isolation [nvim_acceptance](#nvim_acceptance)
-    - [ ] TODO: Document Vim mode and differences [vim_docs](#vim_docs)
+    - [ ] TODO: Document Vim mode in repository docs [vim_docs](#vim_docs)
+    - [ ] TODO: Bump rmux version for Vim mode [vim_version](#vim_version)
+  - [ ] TODO: Make Vim bindings configurable [vim_config](#vim_config)
+    - [ ] TODO: Define Vim binding configuration [vim_config_design](#vim_config_design)
+    - [ ] TODO: Implement configurable Vim bindings [vim_config_impl](#vim_config_impl)
+    - [ ] TODO: Verify configurable Vim bindings [vim_config_verify](#vim_config_verify)
 - [ ] TODO: Add configurable per-window borders and gaps [window_borders](#window_borders)
 
 ## headless_session_input
@@ -56,7 +61,7 @@ Deferred idea only: do not implement now. Revisit if a concrete workflow require
 
 - Scope: coordinated
 - Difficulty: 2 kyu
-- Children: vim_research & vim_history & vim_transitions & vim_navigation & vim_search & vim_selection & vim_app_control & vim_acceptance
+- Children: vim_research & vim_history & vim_transitions & vim_navigation & vim_search & vim_selection & vim_app_control & vim_acceptance & vim_config
 
 Provide Vim-style navigation, search and selection scoped to the focused buffer, following dotFiles st-meta-vim-full unless specified otherwise. Share mode, navigation, search and selection state across windows and attached clients displaying the same buffer; different buffers remain independent. Retain about 2,000 terminal history rows per buffer. Dividers, borders, gaps and unused-space padding are display decorations, not buffer contents: exclude them from history, search, selection and copied text. Insert mode passes ordinary input through; Alt+Escape enters Normal, Alt+d/f enter and scroll, and Ctrl+f opens search. Normal Escape/i returns to Insert; v, V and Ctrl+v enter character, line and block Visual modes. Visual Escape clears selection and returns to Normal; y copies and returns to Insert. Search from Visual retains the selection; comma and semicolon navigate matches. Applications can disable rmux Vim bindings for their buffer, leaving window-management shortcuts available; Neovim integration restores them on exit. OMP should remain navigable. Test initially with st -V; dynamic st control is future work, not a dependency. Do not implement mouse yanks. Difficulty: coordinated changes to terminal history, input, rendering and application control; exact protocol and search interaction need investigation.
 
@@ -254,10 +259,10 @@ Test Neovim lifecycle, restoration and other buffers, including relevant failure
 
 - Scope: coordinated
 - Difficulty: 4 kyu
-- Dependency: vim_navigation & vim_search & vim_selection & vim_app_control
-- Children: vim_compare & omp_acceptance & nvim_acceptance & vim_docs
+- Dependency: vim_navigation & vim_search & vim_selection & vim_app_control & vim_config
+- Children: vim_compare & omp_acceptance & nvim_acceptance & vim_docs & vim_version
 
-Compare real st and rmux interactions and verify OMP and Neovim end to end. Difficulty: terminal lifecycle and real application behavior need integration testing. Depends on navigation, search, selection and application control.
+Compare real st and rmux interactions, verify OMP and Neovim end to end, document the feature and bump the package version. Difficulty: terminal lifecycle and real application behavior need integration testing. Depends on navigation, search, selection, application control and configurable bindings.
 
 ## vim_compare
 
@@ -273,7 +278,40 @@ Confirm Neovim receives its bindings while OMP remains navigable in another buff
 
 ## vim_docs
 
-Document bindings, 2,000-row history, shared buffer-scoped navigation and selection, application control, st -V setup and intentional differences from st.
+- Dependency: vim_config & vim_compare & omp_acceptance & nvim_acceptance
+
+Document Vim mode in the repository docs, including default and configurable bindings with an n and Shift+n search example, 2,000-row history, shared buffer-scoped navigation and selection, application control, st -V setup and intentional differences from st.
+
+## vim_config
+
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Dependency: vim_navigation & vim_search & vim_selection
+- Children: vim_config_design & vim_config_impl & vim_config_verify
+
+Allow users to configure Vim-mode actions and keybindings using the existing rmux configuration. Preserve the agreed st-style bindings as defaults, while supporting alternatives such as n and Shift+n for search matches. Difficulty: mode-specific input and conflicts with other bindings need a clear resolution. Depends on the Vim navigation, search and selection behavior.
+
+## vim_config_design
+
+Specify how users map keys to Vim actions, including mode-specific bindings and conflicts, consistently with existing rmux configuration.
+
+## vim_config_impl
+
+- Dependency: vim_config_design
+
+Apply configured Vim bindings while retaining the agreed defaults for omitted settings.
+
+## vim_config_verify
+
+- Dependency: vim_config_impl
+
+Test default bindings and overrides, including n and Shift+n for next and previous search matches, and mode-specific conflicts.
+
+## vim_version
+
+- Dependency: vim_docs
+
+After implementation, verification and documentation, update the package version in Cargo.toml and affected lockfile metadata according to the repository Semantic Versioning policy; verify the resulting package version.
 
 # DONEs
 
