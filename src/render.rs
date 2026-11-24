@@ -10,13 +10,35 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use vt100::{Color as VtColor, Parser};
 
 use crate::layout::{Divider, LayoutGeometry, LayoutSnapshot, PaneRect};
+use crate::input::InputContext;
 
 pub(crate) const BUFFER_SNAPSHOT: u8 = 4;
 pub(crate) const BUFFER_OUTPUT: u8 = 5;
+pub(crate) const VIM_STATE: u8 = crate::server::VIM_STATE;
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct VimView {
+    buffer: u64,
+    mode: String,
+    cursor_row: usize,
+    cursor_col: u16,
+    selection: Option<(usize, u16, usize, u16)>,
+    #[serde(default)]
+    selection_mode: Option<String>,
+    matches: Vec<Vec<(usize, u16)>>,
+    active_match: Option<usize>,
+    prompt: Option<String>,
+    app_control: bool,
+    history_len: usize,
+    scrollback: usize,
+}
 
 pub(crate) struct Renderer {
     snapshot: Option<LayoutSnapshot>,
     parsers: HashMap<u64, Parser>,
+    history_parsers: HashMap<u64, Parser>,
+    history_offsets: HashMap<u64, usize>,
+    vim: HashMap<u64, VimView>,
     prompt: Option<(String, usize)>,
     bracketed_paste: Option<bool>,
     config: crate::config::Config,
@@ -33,6 +55,9 @@ impl Renderer {
         Self {
             snapshot: None,
             parsers: HashMap::new(),
+            history_parsers: HashMap::new(),
+            history_offsets: HashMap::new(),
+            vim: HashMap::new(),
             prompt: None,
             bracketed_paste: None,
             config,
@@ -66,6 +91,42 @@ impl Renderer {
                     .ok_or_else(|| invalid_frame("buffer output before snapshot"))?;
                 parser.process(&payload[8..]);
             }
+            crate::server::HISTORY_SNAPSHOT => {
+                if payload.len() < 16 {
+                    return Err(invalid_frame("short history snapshot"));
+                }
+                let buffer = read_u64(payload, 0);
+                let rows = std::num::NonZeroU16::new(read_u16(payload, 8))
+                    .ok_or_else(|| invalid_frame("zero-sized history snapshot"))?;
+                let cols = std::num::NonZeroU16::new(read_u16(payload, 10))
+                    .ok_or_else(|| invalid_frame("zero-sized history snapshot"))?;
+                let offset = u32::from_be_bytes(payload[12..16].try_into().unwrap());
+                let continuation = offset & (1 << 31) != 0;
+                let offset = offset & !(1 << 31);
+                if continuation {
+                    let parser = self
+                        .history_parsers
+                        .get_mut(&buffer)
+                        .ok_or_else(|| invalid_frame("history continuation before snapshot"))?;
+                    if parser.screen().size() != (rows, cols) {
+                        return Err(invalid_frame("history continuation size changed"));
+                    }
+                    parser.process(&payload[16..]);
+                } else if offset == 0 {
+                    self.history_parsers.remove(&buffer);
+                    self.history_offsets.remove(&buffer);
+                } else {
+                    let mut parser = Parser::new(rows, cols, 0);
+                    parser.process(&payload[16..]);
+                    self.history_parsers.insert(buffer, parser);
+                    self.history_offsets.insert(buffer, offset as usize);
+                }
+            }
+            VIM_STATE => {
+                let view: VimView = serde_json::from_slice(payload)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                self.vim.insert(view.buffer, view);
+            }
             _ => return Err(invalid_frame("invalid renderer frame")),
         }
         Ok(())
@@ -74,6 +135,11 @@ impl Renderer {
     pub(crate) fn set_layout(&mut self, snapshot: LayoutSnapshot) {
         self.parsers
             .retain(|buffer, _| snapshot.buffers.contains(buffer));
+        self.history_parsers
+            .retain(|buffer, _| snapshot.buffers.contains(buffer));
+        self.history_offsets
+            .retain(|buffer, _| snapshot.buffers.contains(buffer));
+        self.vim.retain(|buffer, _| snapshot.buffers.contains(buffer));
         self.snapshot = Some(snapshot);
     }
 
@@ -88,6 +154,26 @@ impl Renderer {
         Some((buffer, name))
     }
 
+    pub(crate) fn input_context(&self) -> InputContext {
+        let Some(view) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.active_buffer)
+            .and_then(|buffer| self.vim.get(&buffer))
+        else {
+            return InputContext::AppDisabled;
+        };
+        if view.app_control {
+            return InputContext::AppDisabled;
+        }
+        match view.mode.as_str() {
+            "insert" => InputContext::Insert,
+            "normal" => InputContext::Normal,
+            "visual" | "visual-line" | "visual-block" => InputContext::Visual,
+            "search" => InputContext::Search,
+            _ => InputContext::AppDisabled,
+        }
+    }
     pub(crate) fn has_buffer(&self, buffer: u64) -> bool {
         self.snapshot
             .as_ref()
@@ -103,9 +189,13 @@ impl Renderer {
             return Ok(());
         };
         let bracketed_paste = self.prompt.is_none()
-            && snapshot.active_buffer
-                .and_then(|buffer| self.parsers.get(&buffer))
-                .is_some_and(|parser| parser.screen().bracketed_paste());
+            && snapshot.active_buffer.is_some_and(|buffer| {
+                !self.history_parsers.contains_key(&buffer)
+                    && self
+                        .parsers
+                        .get(&buffer)
+                        .is_some_and(|parser| parser.screen().bracketed_paste())
+            });
         if self.bracketed_paste != Some(bracketed_paste) {
             if bracketed_paste {
                 queue!(output, crossterm::event::EnableBracketedPaste)?;
@@ -119,15 +209,34 @@ impl Renderer {
         if rows >= 3 {
             if let Some((prompt, _)) = self.prompt.as_ref() {
                 draw_header_line(output, prompt, cols, &self.config)?;
+            } else if let Some(prompt) = snapshot
+                .active_buffer
+                .and_then(|buffer| self.vim.get(&buffer))
+                .and_then(|view| view.prompt.as_ref())
+            {
+                draw_header_line(output, &format!("/{prompt}"), cols, &self.config)?;
             } else {
                 draw_buffer_line(output, snapshot, cols, &geometry, &self.config)?;
             }
         }
         for placement in &geometry.windows {
+            let view = self.vim.get(&placement.buffer);
+            let history_offset = self
+                .history_offsets
+                .get(&placement.buffer)
+                .copied()
+                .unwrap_or_else(|| view.map_or(0, |view| view.scrollback));
+            let absolute_top = view.map_or(0, |view| {
+                view.history_len.saturating_sub(history_offset)
+            });
             draw_pane(
                 output,
                 placement.rect,
-                self.parsers.get(&placement.buffer),
+                self.history_parsers
+                    .get(&placement.buffer)
+                    .or_else(|| self.parsers.get(&placement.buffer)),
+                view,
+                absolute_top,
                 &self.config,
             )?;
         }
@@ -143,19 +252,56 @@ impl Renderer {
                     .min(cols.saturating_sub(1) as usize) as u16;
                 queue!(output, MoveTo(cursor_col, 0), Show)?;
             }
+        } else if let Some(prompt) = snapshot
+            .active_buffer
+            .and_then(|buffer| self.vim.get(&buffer))
+            .and_then(|view| view.prompt.as_ref())
+        {
+            let cursor_col = UnicodeWidthStr::width(prompt.as_str())
+                .saturating_add(1)
+                .min(cols.saturating_sub(1) as usize) as u16;
+            queue!(output, MoveTo(cursor_col, 0), Show)?;
         } else if let Some(placement) = geometry
             .windows
             .iter()
             .find(|window| window.id == snapshot.focused_window)
         {
-            if let Some(parser) = self.parsers.get(&placement.buffer) {
+            if let Some(parser) = self
+                .history_parsers
+                .get(&placement.buffer)
+                .or_else(|| self.parsers.get(&placement.buffer))
+            {
                 let screen = parser.screen();
-                let (cursor_row, cursor_col) = screen.cursor_position();
                 let size = screen.size();
                 let (left, top, width, height) =
                     centered_origin(placement.rect, (size.0.get(), size.1.get()));
-                if !screen.hide_cursor() && cursor_row < height && cursor_col < width {
-                    queue!(output, MoveTo(left + cursor_col, top + cursor_row), Show)?;
+                let vim_cursor = self.vim.get(&placement.buffer).filter(|view| {
+                    !view.app_control
+                        && matches!(view.mode.as_str(), "normal" | "visual" | "visual-line" | "visual-block")
+                });
+                let (cursor_row, cursor_col) = if let Some(view) = vim_cursor {
+                    let offset = self
+                        .history_offsets
+                        .get(&placement.buffer)
+                        .copied()
+                        .unwrap_or(view.scrollback);
+                    let view_top = view.history_len.saturating_sub(offset);
+                    (
+                        view.cursor_row.saturating_sub(view_top),
+                        usize::from(view.cursor_col),
+                    )
+                } else {
+                    let (row, col) = screen.cursor_position();
+                    (usize::from(row), usize::from(col))
+                };
+                let native_cursor_visible = vim_cursor.is_some()
+                    || (!self.history_parsers.contains_key(&placement.buffer)
+                        && !screen.hide_cursor());
+                if native_cursor_visible
+                    && cursor_row < usize::from(height)
+                    && cursor_col < usize::from(width)
+                {
+                    queue!(output, MoveTo(left + cursor_col as u16, top + cursor_row as u16), Show)?;
                 }
             }
         }
@@ -362,6 +508,8 @@ fn draw_pane(
     output: &mut impl Write,
     rect: PaneRect,
     parser: Option<&Parser>,
+    vim: Option<&VimView>,
+    absolute_top: usize,
     config: &crate::config::Config,
 ) -> io::Result<()> {
     let Some(parser) = parser else {
@@ -382,7 +530,7 @@ fn draw_pane(
             if cell.is_wide_continuation() {
                 continue;
             }
-            let style = CellStyle {
+            let mut style = CellStyle {
                 foreground: convert_color(cell.fgcolor()),
                 background: convert_color(cell.bgcolor()),
                 bold: cell.bold(),
@@ -391,6 +539,17 @@ fn draw_pane(
                 underline: cell.underline(),
                 inverse: cell.inverse(),
             };
+            if let Some(view) = vim {
+                let absolute_row = absolute_top + usize::from(row);
+                let selected = selection_contains(view, absolute_row, col);
+                let matched = match_contains(view, absolute_row, col);
+                let active_match = view
+                    .active_match
+                    .and_then(|index| view.matches.get(index))
+                    .is_some_and(|positions| positions.contains(&(absolute_row, col)));
+                style.inverse |= selected || active_match;
+                style.underline |= matched && !selected && !active_match;
+            }
             apply_cell_style(output, previous_style, style)?;
             previous_style = Some(style);
             queue!(
@@ -404,6 +563,31 @@ fn draw_pane(
         }
     }
     queue!(output, SetAttribute(Attribute::Reset))
+}
+
+fn selection_contains(view: &VimView, row: usize, col: u16) -> bool {
+    let Some((start_row, start_col, end_row, end_col)) = view.selection else {
+        return false;
+    };
+    if row < start_row || row > end_row {
+        return false;
+    }
+    match view.selection_mode.as_deref().unwrap_or(&view.mode) {
+        "visual-line" => true,
+        "visual-block" => (start_col.min(end_col)..=start_col.max(end_col)).contains(&col),
+        "visual" => {
+            (row > start_row || col >= start_col)
+                && (row < end_row || col <= end_col)
+        }
+        _ => false,
+    }
+}
+
+fn match_contains(view: &VimView, row: usize, col: u16) -> bool {
+    view.matches
+        .iter()
+        .flatten()
+        .any(|&(match_row, match_col)| match_row == row && match_col == col)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -668,6 +852,57 @@ mod tests {
         renderer.draw(&mut output, 10, 3).unwrap();
         assert!(output.windows(8).any(|bytes| bytes == b"\x1b[?2004l"));
     }
+    #[test]
+    fn input_context_tracks_mode_and_application_control() {
+        let mut renderer = Renderer::default();
+        assert_eq!(renderer.input_context(), InputContext::AppDisabled);
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 1 },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1],
+            buffer_names: HashMap::new(),
+        });
+        for (mode, expected) in [
+            ("insert", InputContext::Insert),
+            ("normal", InputContext::Normal),
+            ("visual", InputContext::Visual),
+            ("visual-line", InputContext::Visual),
+            ("visual-block", InputContext::Visual),
+            ("search", InputContext::Search),
+        ] {
+            let state = serde_json::json!({
+                "buffer": 1,
+                "mode": mode,
+                "cursor_row": 0,
+                "cursor_col": 0,
+                "selection": null,
+                "matches": [],
+                "active_match": null,
+                "prompt": null,
+                "app_control": false,
+                "history_len": 0,
+                "scrollback": 0
+            });
+            renderer.apply_frame(VIM_STATE, &serde_json::to_vec(&state).unwrap()).unwrap();
+            assert_eq!(renderer.input_context(), expected);
+        }
+        let state = serde_json::json!({
+            "buffer": 1,
+            "mode": "normal",
+            "cursor_row": 0,
+            "cursor_col": 0,
+            "selection": null,
+            "matches": [],
+            "active_match": null,
+            "prompt": null,
+            "app_control": true,
+            "history_len": 0,
+            "scrollback": 0
+        });
+        renderer.apply_frame(VIM_STATE, &serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(renderer.input_context(), InputContext::AppDisabled);
+    }
 
     #[test]
     fn snapshots_initialize_and_output_updates_the_matching_buffer() {
@@ -691,6 +926,59 @@ mod tests {
         );
         assert!(!renderer.parsers.contains_key(&8));
     }
+    #[test]
+    fn historical_view_does_not_stop_live_parser_and_can_return_to_live() {
+        let mut renderer = Renderer::default();
+        let mut live = Vec::from(7u64.to_be_bytes());
+        live.extend_from_slice(&2u16.to_be_bytes());
+        live.extend_from_slice(&4u16.to_be_bytes());
+        live.extend_from_slice(b"live");
+        renderer.apply_frame(BUFFER_SNAPSHOT, &live).unwrap();
+
+        let mut history = Vec::from(7u64.to_be_bytes());
+        history.extend_from_slice(&2u16.to_be_bytes());
+        history.extend_from_slice(&4u16.to_be_bytes());
+        history.extend_from_slice(&1u32.to_be_bytes());
+        history.extend_from_slice(b"past");
+        renderer
+            .apply_frame(crate::server::HISTORY_SNAPSHOT, &history)
+            .unwrap();
+        assert_eq!(
+            renderer.history_parsers[&7]
+                .screen()
+                .cell(0, 0)
+                .unwrap()
+                .contents(),
+            "p"
+        );
+
+        let mut output = Vec::from(7u64.to_be_bytes());
+        output.extend_from_slice(b"\x1b[1;1H!");
+        renderer.apply_frame(BUFFER_OUTPUT, &output).unwrap();
+        assert_eq!(
+            renderer.parsers[&7]
+                .screen()
+                .cell(0, 0)
+                .unwrap()
+                .contents(),
+            "!"
+        );
+        assert_eq!(
+            renderer.history_parsers[&7]
+                .screen()
+                .cell(0, 0)
+                .unwrap()
+                .contents(),
+            "p"
+        );
+
+        history[12..16].copy_from_slice(&0u32.to_be_bytes());
+        renderer
+            .apply_frame(crate::server::HISTORY_SNAPSHOT, &history)
+            .unwrap();
+        assert!(!renderer.history_parsers.contains_key(&7));
+    }
+
 
     #[test]
     fn drawing_centers_the_buffer_over_the_pattern() {
@@ -1221,5 +1509,48 @@ mod tests {
         );
         terminal.process(&output);
         assert_eq!(terminal.screen().cell(1, 0).unwrap().contents(), "");
+    }
+
+    #[test]
+    fn absolute_visual_ranges_clip_at_viewport_and_keep_their_shape() {
+        let mut view = VimView {
+            buffer: 1,
+            mode: "visual".into(),
+            cursor_row: 8,
+            cursor_col: 4,
+            selection: Some((4, 2, 8, 4)),
+            selection_mode: None,
+            matches: Vec::new(),
+            active_match: None,
+            prompt: None,
+            app_control: false,
+            history_len: 12,
+            scrollback: 6,
+        };
+
+        // The local viewport is absolute rows 6..8: a selection beginning in
+        // scrollback still covers the visible part, not a saturated row zero.
+        assert!(selection_contains(&view, 6, 0));
+        assert!(selection_contains(&view, 8, 4));
+        assert!(!selection_contains(&view, 8, 5));
+        assert!(!selection_contains(&view, 9, 3));
+        view.selection = Some((1, 1, 3, 4));
+        assert!(!selection_contains(&view, 6, 0));
+
+        view.matches = vec![vec![(6, 2), (8, 4)]];
+        assert!(match_contains(&view, 6, 2));
+        assert!(match_contains(&view, 8, 4));
+        assert!(!match_contains(&view, 0, 2));
+        assert!(!match_contains(&view, 9, 4));
+        view.mode = "visual-line".into();
+        view.selection = Some((6, 2, 8, 4));
+        assert!(selection_contains(&view, 7, 0));
+        view.mode = "visual-block".into();
+        assert!(selection_contains(&view, 7, 3));
+        view.mode = "search".into();
+        view.selection_mode = Some("visual-block".into());
+        assert!(selection_contains(&view, 7, 3));
+        assert!(!selection_contains(&view, 7, 1));
+        assert!(!selection_contains(&view, 7, 1));
     }
 }

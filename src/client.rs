@@ -1,3 +1,4 @@
+use std::process::{Command, Stdio};
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -7,9 +8,12 @@ use std::time::{Duration, Instant};
 
 use crate::Request;
 use crate::input::{InputAction, InputDecoder};
-use crate::render::{BUFFER_OUTPUT, BUFFER_SNAPSHOT, Renderer};
+use crate::render::{BUFFER_OUTPUT, BUFFER_SNAPSHOT, Renderer, VIM_STATE};
 use crate::runtime::{SessionPaths, read_response, write_request};
-use crate::server::{CLOSE, INPUT, RENAME_BUFFER, RESIZE, WINDOW_STATE, read_frame, write_frame};
+use crate::server::{
+    CLOSE, HISTORY_SNAPSHOT, HISTORY_VIEW, INPUT, RENAME_BUFFER, RESIZE, VIM_FLUSH, VIM_KEY,
+    WINDOW_STATE, YANK, read_frame, write_frame,
+};
 
 const PROMPT_ESCAPE_TIMEOUT: Duration = Duration::from_millis(40);
 const PROMPT_KEYS: &[&[u8]] = &[b"\x1b\x7f", b"\x1b\x08", b"\x1b[1;5D", b"\x1b[1;5C"];
@@ -231,6 +235,7 @@ pub(crate) fn attach(
     let mut renderer = Renderer::with_config(config.clone());
     let mut input_decoder = InputDecoder::configured(&config);
     let mut rename_prompt = None;
+    let mut vim_escape_started = None;
 
     loop {
         if interrupted.load(Ordering::Acquire) {
@@ -246,6 +251,8 @@ pub(crate) fn attach(
             renderer.draw(&mut output, last_size.0, last_size.1)?;
         }
         if let Some(action) = input_decoder.expire(Instant::now()) {
+            let keep_escape_timeout =
+                matches!(&action, InputAction::Bytes(bytes) if bytes.ends_with(&[0x1b]));
             handle_input_action(
                 &mut server,
                 &mut input_decoder,
@@ -255,10 +262,22 @@ pub(crate) fn attach(
                 last_size,
                 action,
             )?;
+            if !keep_escape_timeout {
+                vim_escape_started = None;
+            }
+        }
+        if vim_escape_started
+            .is_some_and(|started: Instant| started.elapsed() >= PROMPT_ESCAPE_TIMEOUT)
+        {
+            write_frame(&mut server, VIM_FLUSH, &[])?;
+            vim_escape_started = None;
         }
         let now = Instant::now();
         let mut timeout = input_decoder.remaining_timeout(now).unwrap_or(Duration::from_millis(100));
         if let Some(started) = rename_prompt.as_ref().and_then(|prompt| prompt.escape_started) {
+            timeout = timeout.min(PROMPT_ESCAPE_TIMEOUT.saturating_sub(now.duration_since(started)));
+        }
+        if let Some(started) = vim_escape_started {
             timeout = timeout.min(PROMPT_ESCAPE_TIMEOUT.saturating_sub(now.duration_since(started)));
         }
         let timeout = timeout.as_millis().clamp(1, 100) as i32;
@@ -300,6 +319,9 @@ pub(crate) fn attach(
                 last_size,
                 &input_buffer[..length],
             )?;
+            let raw_input = &input_buffer[..length];
+            vim_escape_started =
+                ends_with_unpaired_escape(raw_input, vim_escape_started.is_some()).then(Instant::now);
         }
         if descriptors[1].revents & libc::POLLIN != 0 {
             match read_frame(&mut server)? {
@@ -309,6 +331,15 @@ pub(crate) fn attach(
                 }
                 Some((BUFFER_OUTPUT, bytes)) => {
                     renderer.apply_frame(BUFFER_OUTPUT, &bytes)?;
+                    renderer.draw(&mut output, last_size.0, last_size.1)?;
+                }
+                Some((HISTORY_SNAPSHOT, bytes)) => {
+                    renderer.apply_frame(HISTORY_SNAPSHOT, &bytes)?;
+                    renderer.draw(&mut output, last_size.0, last_size.1)?;
+                }
+                Some((YANK, bytes)) => report_yank(&bytes, &mut output, last_size),
+                Some((VIM_STATE, bytes)) => {
+                    renderer.apply_frame(VIM_STATE, &bytes)?;
                     renderer.draw(&mut output, last_size.0, last_size.1)?;
                 }
                 Some((WINDOW_STATE, bytes)) => {
@@ -372,6 +403,16 @@ fn ensure_resize_support(step: u8, supported: bool) -> io::Result<()> {
     Ok(())
 }
 
+fn ends_with_unpaired_escape(bytes: &[u8], previous_pending: bool) -> bool {
+    let trailing = bytes.iter().rev().take_while(|&&byte| byte == 0x1b).count();
+    let previous = if previous_pending && bytes.iter().all(|&byte| byte == 0x1b) {
+        1
+    } else {
+        0
+    };
+    (trailing + previous) % 2 == 1
+}
+
 fn send_input(
     server: &mut UnixStream,
     decoder: &mut InputDecoder,
@@ -392,10 +433,11 @@ fn send_input(
             bytes,
         );
     }
-    if !decoder.should_decode(bytes) {
+    let context = renderer.input_context();
+    if !decoder.should_decode_with_context(bytes, context) {
         return write_frame(server, INPUT, bytes);
     }
-    let actions = decoder.feed(bytes);
+    let actions = decoder.feed_with_context(bytes, context);
     for action in actions {
         handle_input_action(
             server,
@@ -447,7 +489,13 @@ fn handle_input_action(
             }
             Ok(())
         }
-        InputAction::Command(command) => write_frame(server, command.kind, command.payload),
+        InputAction::Command(command) => {
+            write_frame(server, command.kind, command.payload)?;
+            if command.kind == VIM_KEY && command.payload == b"\x1b" {
+                write_frame(server, VIM_FLUSH, &[])?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -538,6 +586,32 @@ mod tests {
         send_input(server, decoder, renderer, prompt, output, (20, 3), bytes).unwrap();
     }
 
+
+    #[test]
+    fn semantic_normal_escape_flushes_vim_escape_immediately() {
+        let (mut client, mut peer) = UnixStream::pair().unwrap();
+        let mut decoder = InputDecoder::default();
+        let mut renderer = renderer_with_buffer();
+        let mut prompt = None;
+        let mut output = Vec::new();
+
+        handle_input_action(
+            &mut client,
+            &mut decoder,
+            &mut renderer,
+            &mut prompt,
+            &mut output,
+            (20, 3),
+            InputAction::Command(crate::input::InputCommand {
+                kind: VIM_KEY,
+                payload: b"\x1b",
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(crate::server::read_frame(&mut peer).unwrap(), Some((VIM_KEY, b"\x1b".to_vec())));
+        assert_eq!(crate::server::read_frame(&mut peer).unwrap(), Some((VIM_FLUSH, Vec::new())));
+    }
     #[test]
     fn rename_edits_words_at_unicode_cursor_boundaries() {
         let mut prompt = RenamePrompt::new(7, "one 雪  three".into());
@@ -668,6 +742,18 @@ mod tests {
         assert!(prompt.is_none());
     }
     #[test]
+    fn history_view_request_encodes_buffer_and_scrollback_offset() {
+        let (mut client, mut peer) = UnixStream::pair().unwrap();
+        set_history_view(&mut client, 42, 17).unwrap();
+        let mut expected = 42u64.to_be_bytes().to_vec();
+        expected.extend_from_slice(&17u32.to_be_bytes());
+        assert_eq!(
+            crate::server::read_frame(&mut peer).unwrap(),
+            Some((HISTORY_VIEW, expected))
+        );
+    }
+
+    #[test]
     fn resize_step_requires_server_capability_only_when_nondefault() {
         assert!(ensure_resize_support(5, false).is_ok());
         assert!(ensure_resize_support(12, true).is_ok());
@@ -676,6 +762,25 @@ mod tests {
             io::ErrorKind::Unsupported
         );
     }
+
+    #[test]
+    fn escape_timeout_ignores_complete_alt_escape_sequences() {
+        assert!(ends_with_unpaired_escape(b"\x1b", false));
+        assert!(!ends_with_unpaired_escape(b"\x1b\x1b", false));
+        assert!(!ends_with_unpaired_escape(b"\x1b", true));
+        assert!(ends_with_unpaired_escape(b"\x1b\x1b", true));
+    }
+}
+
+pub(crate) fn set_history_view(
+    server: &mut UnixStream,
+    buffer: u64,
+    scrollback_rows: u32,
+) -> io::Result<()> {
+    let mut payload = Vec::with_capacity(12);
+    payload.extend_from_slice(&buffer.to_be_bytes());
+    payload.extend_from_slice(&scrollback_rows.to_be_bytes());
+    write_frame(server, HISTORY_VIEW, &payload)
 }
 
 pub(crate) fn terminal_size() -> (u16, u16) {
@@ -684,3 +789,68 @@ pub(crate) fn terminal_size() -> (u16, u16) {
         _ => (80, 24),
     }
 }
+fn set_clipboard(bytes: &[u8]) -> io::Result<()> {
+    for selection in ["clipboard", "primary"] {
+        let mut child = Command::new("xclip")
+            .args(["-selection", selection])
+            .stdin(Stdio::piped())
+            .spawn()?;
+        let Some(mut stdin) = child.stdin.take() else {
+            return Err(io::Error::other("xclip stdin unavailable"));
+        };
+        std::io::Write::write_all(&mut stdin, bytes)?;
+        drop(stdin);
+        let status = child.wait()?;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "xclip {selection} exited with {status}"
+            )));
+        }
+    }
+    Ok(())
+}
+fn report_yank(bytes: &[u8], output: &mut impl io::Write, size: (u16, u16)) {
+    if let Err(error) = set_clipboard(bytes) {
+        let _ = report_yank_error(error, output, size);
+    }
+}
+
+fn report_yank_error(
+    error: io::Error,
+    output: &mut impl io::Write,
+    size: (u16, u16),
+) -> io::Result<()> {
+    let reason = error
+        .to_string()
+        .chars()
+        .map(|character| if character.is_control() { ' ' } else { character })
+        .collect::<String>();
+    let message = format!("rmux: clipboard yank failed (xclip): {reason}");
+    crossterm::queue!(
+        output,
+        crossterm::cursor::MoveTo(0, size.1.saturating_sub(1)),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
+        crossterm::style::Print(message)
+    )?;
+    output.flush()
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_errors_are_reported_in_terminal_status() {
+        let mut output = Vec::new();
+        report_yank_error(
+            io::Error::new(io::ErrorKind::NotFound, "xclip unavailable\n"),
+            &mut output,
+            (80, 24),
+        )
+        .unwrap();
+        let text = String::from_utf8_lossy(&output);
+        assert!(text.contains("rmux: clipboard yank failed (xclip): xclip unavailable "));
+        assert!(!text.contains('\n'));
+    }
+}
+

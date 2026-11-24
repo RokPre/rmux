@@ -17,6 +17,9 @@ CLOSE = 2
 WINDOW_STATE = 3
 BUFFER_SNAPSHOT = 4
 BUFFER_OUTPUT = 5
+HISTORY_SNAPSHOT = 6
+VIM_STATE = 7
+BUFFER_OUTPUT = 5
 CLIENT_RESIZE = 2
 NEW_BUFFER = 4
 CLOSE_BUFFER = 5
@@ -168,6 +171,10 @@ class Sessions(unittest.TestCase):
             while True:
                 kind, payload = self.read_frame(slow)
                 self.assertNotEqual(kind, CLOSE)
+                self.assertIn(
+                    kind,
+                    (WINDOW_STATE, BUFFER_SNAPSHOT, BUFFER_OUTPUT, HISTORY_SNAPSHOT, VIM_STATE),
+                )
                 if kind == BUFFER_SNAPSHOT and b'RECOVEREDMARK' in payload[12:]:
                     self.assertEqual(int.from_bytes(payload[8:10], 'big'), 19)
                     self.assertEqual(int.from_bytes(payload[10:12], 'big'), 70)
@@ -176,6 +183,10 @@ class Sessions(unittest.TestCase):
             while True:
                 kind, payload = self.read_frame(slow)
                 self.assertNotEqual(kind, CLOSE)
+                self.assertIn(
+                    kind,
+                    (WINDOW_STATE, BUFFER_SNAPSHOT, BUFFER_OUTPUT, HISTORY_SNAPSHOT, VIM_STATE),
+                )
                 if kind == WINDOW_STATE and json.loads(payload)['buffer_names']['1'] == 'after-recovery':
                     break
         finally:
@@ -272,7 +283,7 @@ class Sessions(unittest.TestCase):
                 return json.loads(payload)
             if kind == CLOSE:
                 self.fail('session closed while waiting for layout state')
-            self.assertIn(kind, (BUFFER_SNAPSHOT, BUFFER_OUTPUT))
+            self.assertIn(kind, (BUFFER_SNAPSHOT, BUFFER_OUTPUT, HISTORY_SNAPSHOT, VIM_STATE))
 
     def read_buffer_size(self, sock, buffer):
         while True:
@@ -286,7 +297,7 @@ class Sessions(unittest.TestCase):
                     cols = int.from_bytes(payload[10:12], 'big')
                     return rows, cols
             else:
-                self.assertIn(kind, (WINDOW_STATE, BUFFER_OUTPUT))
+                self.assertIn(kind, (WINDOW_STATE, BUFFER_OUTPUT, HISTORY_SNAPSHOT, VIM_STATE))
 
     def window_leaves(self, node):
         if node['kind'] == 'window':
@@ -298,7 +309,7 @@ class Sessions(unittest.TestCase):
         output = bytearray()
         while text not in output:
             kind, payload = self.read_frame(sock)
-            if kind == WINDOW_STATE:
+            if kind in (WINDOW_STATE, HISTORY_SNAPSHOT, VIM_STATE):
                 continue
             if kind == CLOSE:
                 self.fail('session closed while waiting for buffer output')
@@ -368,7 +379,7 @@ class Sessions(unittest.TestCase):
             f'open({str(marker)!r},"wb").write(response)'
         )
         self.start('new', 'cursor-query', '--', 'python3', '-c', script)
-        self.wait_for(marker.exists)
+        self.wait_for(lambda: marker.exists() and marker.stat().st_size > 0)
         self.assertEqual(marker.read_bytes(), b'\x1b[4;7R')
 
     def test_cursor_query_works_without_attached_clients(self):

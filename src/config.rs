@@ -331,8 +331,16 @@ impl Config {
             if !ACTIONS.contains(&action.as_str()) {
                 return Err(invalid(format!("unknown binding action {action:?}")));
             }
-            let sequence = parse_key(key).ok_or_else(|| invalid(format!("bindings.{action} has invalid key {key:?}; use ctrl+KEY, alt+KEY, alt+shift+KEY, alt+ctrl+KEY, ctrl+shift+KEY, or a plain ASCII character")))?;
-            if sequences.iter().any(|(_, other)| other == &sequence) {
+            let sequence = parse_key(key).ok_or_else(|| invalid(format!("bindings.{action} has invalid key {key:?}; use esc, ctrl+KEY, ctrl+shift+KEY, alt+KEY, alt+shift+KEY, alt+ctrl+KEY, or a plain ASCII character")))?;
+            if sequences.iter().any(|(other_action, other)| {
+                other == &sequence
+                    && !(action.starts_with("vim_")
+                        && self.bindings.contains_key(action)
+                        && !self.bindings.contains_key(other_action))
+                    && !(other_action.starts_with("vim_")
+                        && self.bindings.contains_key(other_action)
+                        && !self.bindings.contains_key(action))
+            }) {
                 return Err(invalid(format!(
                     "bindings.{action} duplicates another key sequence"
                 )));
@@ -341,7 +349,11 @@ impl Config {
         }
         for (i, (action, sequence)) in sequences.iter().enumerate() {
             for (other, other_sequence) in sequences.iter().skip(i + 1) {
-                if sequence.starts_with(other_sequence) || other_sequence.starts_with(sequence) {
+                let escape_prefix = (sequence == b"\x1b" && other_sequence.starts_with(b"\x1b"))
+                    || (other_sequence == b"\x1b" && sequence.starts_with(b"\x1b"));
+                if (sequence.starts_with(other_sequence) || other_sequence.starts_with(sequence))
+                    && !escape_prefix
+                {
                     return Err(invalid(format!(
                         "bindings.{action} and bindings.{other} have ambiguous prefix sequences"
                     )));
@@ -376,6 +388,47 @@ const ACTIONS: &[&str] = &[
     "split_horizontal",
     "close_window",
     "equalize",
+    "vim_left",
+    "vim_insert",
+    "vim_normal",
+    "vim_insert_search",
+    "vim_scroll_half_down",
+    "vim_scroll_half_up",
+    "vim_scroll_page_down",
+    "vim_scroll_page_up",
+    "vim_scroll_insert_down",
+    "vim_scroll_insert_up",
+    "vim_word_forward",
+    "vim_word_backward",
+    "vim_word_end",
+    "vim_line_start",
+    "vim_first_nonblank",
+    "vim_line_end",
+    "vim_document_end",
+    "vim_down",
+    "vim_up",
+    "vim_right",
+    "vim_next_match",
+    "vim_previous_match",
+    "vim_visual",
+    "vim_visual_line",
+    "vim_search",
+    "vim_search_backward",
+    "vim_yank",
+    "vim_visual_block",
+    "vim_document_start",
+    "vim_word_forward_big",
+    "vim_word_backward_big",
+    "vim_word_end_big",
+    "vim_view_top",
+    "vim_view_middle",
+    "vim_view_bottom",
+    "vim_view_cursor_top",
+    "vim_view_cursor_bottom",
+    "vim_match_forward",
+    "vim_match_backward",
+    "vim_match_next",
+    "vim_match_previous",
 ];
 
 pub(crate) fn parse_color(name: &str) -> Option<crossterm::style::Color> {
@@ -413,6 +466,9 @@ pub(crate) fn parse_color(name: &str) -> Option<crossterm::style::Color> {
 }
 
 pub(crate) fn parse_key(key: &str) -> Option<Vec<u8>> {
+    if matches!(key, "esc" | "escape") {
+        return Some(vec![0x1b]);
+    }
     let (modifiers, character) = if let Some(character) = key.strip_prefix("ctrl+shift+") {
         ("ctrl+shift", character)
     } else if let Some(character) = key.strip_prefix("alt+ctrl+") {
@@ -430,12 +486,18 @@ pub(crate) fn parse_key(key: &str) -> Option<Vec<u8>> {
         return None;
     }
     let c = character.as_bytes()[0];
+    let control = || match c {
+        b'?' => Some(0x7f),
+        b'@'..=b'_' => Some(c - b'@'),
+        b'a'..=b'z' => Some(c.to_ascii_uppercase() - b'@'),
+        _ => None,
+    };
     match modifiers {
         "ctrl+shift" if c.is_ascii_alphabetic() => {
             Some(format!("\x1b[{};6u", c.to_ascii_lowercase() as u16).into_bytes())
         }
-        "alt+ctrl" if c.is_ascii_alphabetic() => Some(vec![0x1b, c.to_ascii_uppercase() - b'@']),
-        "ctrl" if c.is_ascii_alphabetic() => Some(vec![c.to_ascii_uppercase() - b'@']),
+        "alt+ctrl" => Some(vec![0x1b, control()?]),
+        "ctrl" => Some(vec![control()?]),
         "alt+shift" => Some(vec![0x1b, c.to_ascii_uppercase()]),
         "alt" => Some(vec![0x1b, c]),
         "" => Some(vec![c]),
@@ -602,5 +664,31 @@ mod tests {
                 b: 0xc3
             })
         );
+    }
+    #[test]
+    fn control_escape_and_alt_keys_are_parseable() {
+        assert_eq!(parse_key("esc").unwrap(), b"\x1b");
+        assert_eq!(parse_key("ctrl+[").unwrap(), b"\x1b");
+        assert_eq!(parse_key("ctrl+?").unwrap(), b"\x7f");
+        assert_eq!(parse_key("alt+ctrl+[").unwrap(), b"\x1b\x1b");
+        assert_eq!(parse_key("alt+shift+q").unwrap(), b"\x1bQ");
+        assert_eq!(parse_key("ctrl+shift+h").unwrap(), b"\x1b[104;6u");
+    }
+
+    #[test]
+    fn expanded_vim_actions_are_valid_config_bindings() {
+        let config: Config = toml::from_str(
+            r#"
+                [bindings]
+                vim_insert = "alt+i"
+                vim_normal = "esc"
+                vim_scroll_half_down = "ctrl+g"
+                vim_word_forward = "ctrl+shift+u"
+                vim_document_end = "ctrl+shift+g"
+                vim_insert_search = "alt+f"
+            "#,
+        )
+        .unwrap();
+        config.validate(&PathBuf::from("test.toml")).unwrap();
     }
 }

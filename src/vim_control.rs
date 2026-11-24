@@ -76,8 +76,12 @@ impl AppControl {
             return false;
         }
         match request.action {
-            AppAction::Acquire => self.owners.insert(emitter),
-            AppAction::Release => self.owners.remove(&emitter),
+            AppAction::Acquire => {
+                self.owners.insert(emitter);
+            }
+            AppAction::Release => {
+                self.owners.remove(&emitter);
+            }
         }
         true
     }

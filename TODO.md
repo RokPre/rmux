@@ -1,65 +1,6 @@
 # TODOs
 
 - [ ] TODO: Revisit headless session input when a concrete need arises [headless_session_input](#headless_session_input)
-- [ ] TODO: Add buffer-scoped Vim mode matching st [vim_mode](#vim_mode)
-  - [x] TODO: Establish terminal and OMP behavior [vim_research](#vim_research)
-    - [x] TODO: Investigate reference and OMP behavior [vim_observe](#vim_observe)
-      - [x] TODO: Catalog reference Vim interactions [vim_reference](#vim_reference)
-      - [x] TODO: Inspect the OMP re-render command [omp_replay](#omp_replay)
-      - [x] TODO: Trace OMP terminal output safely [omp_trace](#omp_trace)
-    - [x] TODO: Choose history and control designs [vim_design](#vim_design)
-      - [x] TODO: Choose history and view representation [vim_history_design](#vim_history_design)
-      - [x] TODO: Choose application control mechanism [vim_control_design](#vim_control_design)
-  - [ ] TODO: Make buffer history available for navigation [vim_history](#vim_history)
-    - [ ] TODO: Implement and verify buffer history [history_work](#history_work)
-      - [ ] TODO: Retain 2,000 rows of buffer history [history_capacity](#history_capacity)
-      - [ ] TODO: Expose historical buffer rows [history_access](#history_access)
-      - [ ] TODO: Maintain a shared buffer viewport [history_views](#history_views)
-      - [ ] TODO: Handle history changes during navigation [history_lifecycle](#history_lifecycle)
-      - [ ] TODO: Verify buffer history behavior [history_verify](#history_verify)
-  - [ ] TODO: Implement buffer-scoped mode transitions [vim_transitions](#vim_transitions)
-    - [ ] TODO: Implement and verify mode transitions [transitions_work](#transitions_work)
-      - [ ] TODO: Implement mode entry shortcuts [vim_entry](#vim_entry)
-      - [ ] TODO: Implement Normal mode exits [vim_exit](#vim_exit)
-      - [ ] TODO: Implement Visual mode entry [visual_entry](#visual_entry)
-      - [ ] TODO: Implement Visual cancellation [visual_escape](#visual_escape)
-      - [ ] TODO: Verify mode transitions and passthrough [transitions_verify](#transitions_verify)
-  - [ ] TODO: Implement reference-style navigation [vim_navigation](#vim_navigation)
-    - [ ] TODO: Implement and verify navigation [navigation_work](#navigation_work)
-      - [ ] TODO: Implement cursor motions and counts [vim_motions](#vim_motions)
-      - [ ] TODO: Implement viewport scrolling [vim_scrolling](#vim_scrolling)
-      - [ ] TODO: Render navigation feedback [vim_feedback](#vim_feedback)
-      - [ ] TODO: Verify navigation behavior [navigation_verify](#navigation_verify)
-  - [ ] TODO: Implement interactive history search [vim_search](#vim_search)
-    - [ ] TODO: Design and implement search [search_work](#search_work)
-      - [ ] TODO: Define search inside Visual mode [search_visual_design](#search_visual_design)
-      - [ ] TODO: Implement search prompt transitions [search_prompt](#search_prompt)
-      - [ ] TODO: Implement search and match navigation [search_matches](#search_matches)
-      - [ ] TODO: Verify search behavior [search_verify](#search_verify)
-  - [ ] TODO: Implement Visual selection and yank [vim_selection](#vim_selection)
-    - [ ] TODO: Implement and verify Visual selection [selection_work](#selection_work)
-      - [ ] TODO: Implement Visual selection ranges [selection_ranges](#selection_ranges)
-      - [ ] TODO: Render Visual selection [selection_render](#selection_render)
-      - [ ] TODO: Copy Visual selection [selection_yank](#selection_yank)
-      - [ ] TODO: Verify selection and copying [selection_verify](#selection_verify)
-  - [ ] TODO: Support application-controlled Vim bindings [vim_app_control](#vim_app_control)
-    - [ ] TODO: Implement application binding control [app_control_work](#app_control_work)
-      - [ ] TODO: Implement buffer-scoped binding control [app_control](#app_control)
-      - [ ] TODO: Integrate Neovim lifecycle [nvim_hook](#nvim_hook)
-      - [ ] TODO: Verify application binding isolation [app_control_verify](#app_control_verify)
-  - [ ] TODO: Validate and document the complete workflow [vim_acceptance](#vim_acceptance)
-    - [ ] TODO: Verify real terminal workflows [vim_end_to_end](#vim_end_to_end)
-      - [ ] TODO: Compare behavior with plain st [vim_compare](#vim_compare)
-      - [ ] TODO: Verify OMP chat navigation [omp_acceptance](#omp_acceptance)
-      - [ ] TODO: Verify Neovim and OMP isolation [nvim_acceptance](#nvim_acceptance)
-    - [ ] TODO: Document and version Vim mode [vim_release](#vim_release)
-      - [ ] TODO: Document Vim mode in repository docs [vim_docs](#vim_docs)
-      - [ ] TODO: Bump rmux version for Vim mode [vim_version](#vim_version)
-  - [ ] TODO: Make Vim bindings configurable [vim_config](#vim_config)
-    - [ ] TODO: Implement and verify configurable bindings [config_work](#config_work)
-      - [ ] TODO: Define Vim binding configuration [vim_config_design](#vim_config_design)
-      - [ ] TODO: Implement configurable Vim bindings [vim_config_impl](#vim_config_impl)
-      - [ ] TODO: Verify configurable Vim bindings [vim_config_verify](#vim_config_verify)
 - [ ] TODO: Add configurable per-window borders and gaps [window_borders](#window_borders)
 
 ## headless_session_input
@@ -68,444 +9,12 @@
 
 Deferred idea only: do not implement now. Revisit if a concrete workflow requires interacting with an existing buffer without an attached terminal. First investigate whether the agent harness or application provides a suitable native interface. Raw terminal input is not an agent API: the receiving program may be busy, may have exited, or may interpret text and Enter differently; if the shell is active, submitted text could execute as a command. It does not confirm that an agent accepted or completed a request. A separate exec operation would start another process, not send a message to an existing agent, and is not justified merely to run shell commands. If a real use case remains, explore target session and buffer selection, input and submission semantics, and feedback before deciding whether to implement.
 
-## vim_mode
-
-- Scope: coordinated
-- Difficulty: 2 kyu
-- Children: vim_research & vim_history & vim_transitions & vim_navigation & vim_search & vim_selection & vim_app_control & vim_acceptance & vim_config
-- Role: material
-
-Provide Vim-style navigation, search and selection scoped to the focused buffer, following dotFiles st-meta-vim-full unless specified otherwise. Share mode, navigation, search and selection state across windows and attached clients displaying the same buffer; different buffers remain independent. Retain about 2,000 terminal history rows per buffer. Dividers, borders, gaps and unused-space padding are display decorations, not buffer contents: exclude them from history, search, selection and copied text. Insert mode passes ordinary input through; Alt+Escape enters Normal, Alt+d/f enter and scroll, and Ctrl+f opens search. Normal Escape/i returns to Insert; v, V and Ctrl+v enter character, line and block Visual modes. Visual Escape clears selection and returns to Normal; y copies and returns to Insert. Search from Visual retains the selection; comma and semicolon navigate matches. Applications can disable rmux Vim bindings for their buffer, leaving window-management shortcuts available; Neovim integration restores them on exit. OMP should remain navigable. Test initially with st -V; dynamic st control is future work, not a dependency. Do not implement mouse yanks. Difficulty: coordinated changes to terminal history, input, rendering and application control; exact protocol and search interaction need investigation.
-
 ## window_borders
 
 - Scope: coordinated
 - Dependency: configuration
 
 Add optional individual borders around rmux windows, with configurable characters and distinct focused and unfocused colors, plus configurable gaps between adjacent borders or dividers. Preserve the existing single-divider layout as the default. Ensure borders and gaps are reflected consistently in rendering and shared buffer sizing, including small windows and multiple differently sized clients. Revisit and update border configuration when the implementation is designed.
-
-## vim_research
-
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Uncertainty: high
-- Role: composite
-- Children: vim_observe & vim_design
-
-Investigate the installed reference and actual OMP rendering, replay and alternate-screen behavior before selecting a history design. High uncertainty: cached sources may differ from the installed binary. No running user sessions should be disturbed.
-
-## vim_history
-
-- Scope: coordinated
-- Difficulty: 3 kyu
-- Role: composite
-- Children: history_work
-- Dependency: vim_history_design & omp_trace
-
-Retain bounded terminal history and provide one shared navigation view per buffer, rendered in every window and attached client displaying it, without disrupting live output processing. Keep dividers, borders, gaps and padding outside the history. Difficulty: resize, replay, alternate screens, concurrent output and multiple clients require careful handling. Depends on the history design and OMP observations.
-
-## vim_transitions
-
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Role: composite
-- Children: transitions_work
-- Dependency: vim_history_design & vim_control_design
-
-Handle Insert, Normal and the three Visual modes per buffer without intercepting application input in Insert mode except agreed entry bindings. Share mode state between windows and attached clients displaying the same buffer, while keeping different buffers independent. Difficulty: state and input routing must remain consistent across clients. Depends on the view representation and application-control design.
-
-## vim_navigation
-
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Role: composite
-- Children: navigation_work
-- Dependency: history_views & transitions_verify & vim_reference
-
-Reproduce relevant st motions, counts, scrolling and cursor feedback in a shared buffer history view. Difficulty: movement across history, wrapped rows and resize must remain consistent. Depends on history access and mode transitions.
-
-## vim_search
-
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Role: composite
-- Children: search_work
-- Dependency: navigation_verify & vim_reference
-
-Reproduce reference search and highlighting in buffer content, sharing search state across views of the same buffer while preserving the originating Normal or Visual context. Exclude dividers, borders, gaps and padding from search. Difficulty: Visual search interaction needs explicit design. Depends on navigation and the reference behavior catalog.
-
-## vim_selection
-
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Role: composite
-- Children: selection_work
-- Dependency: navigation_verify & visual_entry
-
-Select and copy only the focused buffer content, with character, line and rectangular shapes and reference-style feedback. Share selection across windows and clients displaying that buffer; exclude dividers, borders, gaps and padding. Difficulty: terminal cells, wide characters and line boundaries affect copied text. Depends on navigation and Visual entry.
-
-## vim_app_control
-
-- Scope: coordinated
-- Difficulty: 3 kyu
-- Role: composite
-- Children: app_control_work
-- Dependency: vim_control_design
-
-Provide buffer-scoped enable and disable controls and a Neovim hook, without disabling rmux window shortcuts. Difficulty: restoration, nesting and unexpected exits need reliable semantics. Depends on application-control design.
-
-## vim_acceptance
-
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Dependency: vim_navigation & vim_search & vim_selection & vim_app_control & vim_config
-- Role: composite
-- Children: vim_end_to_end & vim_release
-
-Compare real st and rmux interactions, verify OMP and Neovim end to end, document the feature and bump the package version. Difficulty: terminal lifecycle and real application behavior need integration testing. Depends on navigation, search, selection, application control and configurable bindings.
-
-## vim_config
-
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Dependency: vim_navigation & vim_search & vim_selection
-- Role: composite
-- Children: config_work
-
-Allow users to configure Vim-mode actions and keybindings using the existing rmux configuration. Preserve the agreed st-style bindings as defaults, while supporting alternatives such as n and Shift+n for search matches. Difficulty: mode-specific input and conflicts with other bindings need a clear resolution. Depends on the Vim navigation, search and selection behavior.
-
-## vim_observe
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: vim_reference & omp_replay & omp_trace
-
-Investigate reference and OMP behavior. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
-
-## vim_reference
-
-- Role: atomic
-
-Inspected dotFiles/st-0.8.5/normalMode.c, config.h, st.c and x.c. Reference supports counted movement, word motions, search with smart case, comma/semicolon match movement, three Visual shapes, text-object yanks and clipboard feedback. Keep specified rmux differences, including buffer scope and no mouse yanks.
-
-## omp_replay
-
-- Role: atomic
-
-The dotfiles OMP extension omp/agent/extensions/rerender.ts registers /rerender and calls ctx.reload(). An isolated --no-session PTY run emitted two CSI 3 J scrollback clears on /rerender, without entering the alternate screen; it exited normally.
-
-## omp_trace
-
-- Role: atomic
-
-Isolated --no-session OMP PTY runs exercised startup, resize, a synthetic shell-output transcript, /rerender and normal exit without touching active sessions. Resize temporarily entered and left the alternate screen and cleared scrollback; /rerender cleared scrollback and replayed the synthetic marker. A real chat remains required in OMP acceptance testing.
-
-## vim_design
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: vim_history_design & vim_control_design
-- Dependency: vim_observe
-
-Choose history and control designs. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
-
-## vim_history_design
-
-- Role: atomic
-
-Keep the authoritative vt100 parser and approximately 2,000 scrollback rows in each server buffer. Maintain one navigation position per buffer, synchronized across clients and windows. Send historical snapshots separately from the live client parser, leaving live PTY output and terminal replies active. Clamp or rebase view and selection across eviction, resize, CSI 3 J replay and temporary alternate-screen transitions; exclude rmux decorations.
-
-## vim_control_design
-
-- Role: atomic
-
-Applications send an OSC 777;rmux-app;acquire|release;PID request through their buffer PTY. The server tracks requesting process identities by PID and process start time, scopes each request to the originating buffer, prunes dead owners and leaves unrelated rmux shortcuts enabled. The Neovim hook acquires on entry and resume, and releases on suspend and exit; a remaining live owner keeps bindings disabled.
-
-## history_work
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: history_capacity & history_access & history_views & history_lifecycle & history_verify
-
-Implement and verify buffer history. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
-
-## history_capacity
-
-- Role: atomic
-
-Set the agreed approximate 2,000-row bound and define how overflow evicts old rows.
-
-## history_access
-
-- Role: atomic
-
-Provide historical terminal cells for buffer navigation while preserving attributes and the live screen; exclude rmux decorations.
-
-## history_views
-
-- Role: atomic
-
-Store one navigation position per buffer, shared across its windows and attached clients; keep different buffers independent.
-
-## history_lifecycle
-
-- Role: atomic
-
-Keep view positions and selections valid through output, eviction, reset, replay and resize.
-
-## history_verify
-
-- Role: atomic
-
-Test bounds, shared views across windows and attached clients, isolation between buffers, differently sized windows, attach, live output, resize, resets and OMP replay as applicable. Verify decorations never enter history.
-
-## transitions_work
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: vim_entry & vim_exit & visual_entry & visual_escape & transitions_verify
-
-Implement and verify mode transitions. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
-
-## vim_entry
-
-- Role: atomic
-
-Implement Alt+Escape and Alt+d/f from Insert, including five-row scrolling.
-
-## vim_exit
-
-- Role: atomic
-
-Return to Insert on Escape or i and restore ordinary input routing.
-
-## visual_entry
-
-- Role: atomic
-
-Enter character, line or block Visual mode using v, V or Ctrl+v from Normal.
-
-## visual_escape
-
-- Role: atomic
-
-Clear the selection and return to Normal on Escape.
-
-## transitions_verify
-
-- Role: atomic
-
-Test each agreed transition, shared state across windows and clients, isolation between buffers and unbound application input.
-
-## navigation_work
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: vim_motions & vim_scrolling & vim_feedback & navigation_verify
-
-Implement and verify navigation. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
-
-## vim_motions
-
-- Role: atomic
-
-Implement reference movement commands and numeric counts over buffer history.
-
-## vim_scrolling
-
-- Role: atomic
-
-Implement reference scrolling commands and keep the navigation cursor visible.
-
-## vim_feedback
-
-- Role: atomic
-
-Render the shared navigation cursor and mode feedback in windows displaying the buffer without affecting different buffers.
-
-## navigation_verify
-
-- Role: atomic
-
-Test motions, counts, scroll bounds, focus, shared buffer views across windows and attached clients, and isolation between buffers.
-
-## search_work
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: search_visual_design & search_prompt & search_matches & search_verify
-
-Design and implement search. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
-
-## search_visual_design
-
-- Role: atomic
-
-Specify prompt cancellation, confirmation, match navigation and selection-anchor behavior with the user before implementation.
-
-## search_prompt
-
-- Role: atomic
-
-Open search with Ctrl+f from Insert, Normal and Visual; return to the appropriate context on confirmation or cancellation.
-
-## search_matches
-
-- Role: atomic
-
-Implement incremental smart-case search, match highlighting, comma forward and semicolon backward, plus applicable reference search bindings.
-
-## search_verify
-
-- Role: atomic
-
-Test case sensitivity, both directions, no matches, prompt transitions, shared state across views, isolation between buffers, decoration exclusion and Visual selection retention.
-
-## selection_work
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: selection_ranges & selection_render & selection_yank & selection_verify
-
-Implement and verify Visual selection. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
-
-## selection_ranges
-
-- Role: atomic
-
-Track character, whole-line and rectangular selection from anchor to cursor.
-
-## selection_render
-
-- Role: atomic
-
-Highlight selected buffer cells in every window displaying that buffer, without highlighting decorations or different buffers.
-
-## selection_yank
-
-- Role: atomic
-
-Yank the selected text to the clipboard, provide feedback and return to Insert.
-
-## selection_verify
-
-- Role: atomic
-
-Test each shape, reversed endpoints, text boundaries, clipboard content, shared selection across windows and clients, and isolation between buffers. Verify differently sized windows and scrolling never select or copy dividers, borders, gaps or padding.
-
-## app_control_work
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: app_control & nvim_hook & app_control_verify
-
-Implement application binding control. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
-
-## app_control
-
-- Role: atomic
-
-Provide an application-accessible control for disabling and restoring rmux Vim bindings in the correct buffer.
-
-## nvim_hook
-
-- Role: atomic
-
-Provide a minimal Neovim Lua integration that disables rmux Vim bindings while active and restores them on exit.
-
-## app_control_verify
-
-- Role: atomic
-
-Test Neovim lifecycle, restoration and other buffers, including relevant failure and nesting cases.
-
-## config_work
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: vim_config_design & vim_config_impl & vim_config_verify
-
-Implement and verify configurable bindings. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
-
-## vim_config_design
-
-- Role: atomic
-
-Specify how users map keys to Vim actions, including mode-specific bindings and conflicts, consistently with existing rmux configuration.
-
-## vim_config_impl
-
-- Role: atomic
-- Dependency: vim_config_design
-
-Apply configured Vim bindings while retaining the agreed defaults for omitted settings.
-
-## vim_config_verify
-
-- Role: atomic
-- Dependency: vim_config_impl
-
-Test default bindings and overrides, including n and Shift+n for next and previous search matches, and mode-specific conflicts.
-
-## vim_end_to_end
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: vim_compare & omp_acceptance & nvim_acceptance
-
-Verify real terminal workflows. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
-
-## vim_compare
-
-- Role: atomic
-
-Exercise matching navigation, search and selection scenarios in st and rmux using st -V for rmux.
-
-## omp_acceptance
-
-- Role: atomic
-
-Navigate, search and copy earlier OMP conversation output while OMP is running, including after re-render.
-
-## nvim_acceptance
-
-- Role: atomic
-
-Confirm Neovim receives its bindings while OMP remains navigable in another buffer.
-
-## vim_release
-
-- Role: molecule
-- Scope: coordinated
-- Difficulty: 4 kyu
-- Children: vim_docs & vim_version
-- Dependency: vim_end_to_end & vim_config
-
-Document and version Vim mode. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
-
-## vim_docs
-
-- Role: atomic
-- Dependency: vim_config & vim_compare & omp_acceptance & nvim_acceptance
-
-Document Vim mode in the repository docs, including default and configurable bindings with an n and Shift+n search example, 2,000-row history, shared buffer-scoped navigation and selection, application control, st -V setup and intentional differences from st.
-
-## vim_version
-
-- Role: atomic
-- Dependency: vim_docs
-
-After implementation, verification and documentation, update the package version in Cargo.toml and affected lockfile metadata according to the repository Semantic Versioning policy; verify the resulting package version.
 
 # DONEs
 
@@ -681,6 +190,65 @@ After implementation, verification and documentation, update the package version
 - [x] DONE: Add word editing to buffer rename [rename_word_editing](#rename_word_editing)
 
 - [x] DONE: Investigate OMP crash on resize [omp_resize_crash](#omp_resize_crash)
+- [x] DONE: Add buffer-scoped Vim mode matching st [vim_mode](#vim_mode)
+  - [x] DONE: Establish terminal and OMP behavior [vim_research](#vim_research)
+    - [x] DONE: Investigate reference and OMP behavior [vim_observe](#vim_observe)
+      - [x] DONE: Catalog reference Vim interactions [vim_reference](#vim_reference)
+      - [x] DONE: Inspect the OMP re-render command [omp_replay](#omp_replay)
+      - [x] DONE: Trace OMP terminal output safely [omp_trace](#omp_trace)
+    - [x] DONE: Choose history and control designs [vim_design](#vim_design)
+      - [x] DONE: Choose history and view representation [vim_history_design](#vim_history_design)
+      - [x] DONE: Choose application control mechanism [vim_control_design](#vim_control_design)
+  - [x] DONE: Make buffer history available for navigation [vim_history](#vim_history)
+    - [x] DONE: Implement and verify buffer history [history_work](#history_work)
+      - [x] DONE: Retain 2,000 rows of buffer history [history_capacity](#history_capacity)
+      - [x] DONE: Expose historical buffer rows [history_access](#history_access)
+      - [x] DONE: Maintain a shared buffer viewport [history_views](#history_views)
+      - [x] DONE: Handle history changes during navigation [history_lifecycle](#history_lifecycle)
+      - [x] DONE: Verify buffer history behavior [history_verify](#history_verify)
+  - [x] DONE: Implement buffer-scoped mode transitions [vim_transitions](#vim_transitions)
+    - [x] DONE: Implement and verify mode transitions [transitions_work](#transitions_work)
+      - [x] DONE: Implement mode entry shortcuts [vim_entry](#vim_entry)
+      - [x] DONE: Implement Normal mode exits [vim_exit](#vim_exit)
+      - [x] DONE: Implement Visual mode entry [visual_entry](#visual_entry)
+      - [x] DONE: Implement Visual cancellation [visual_escape](#visual_escape)
+      - [x] DONE: Verify mode transitions and passthrough [transitions_verify](#transitions_verify)
+  - [x] DONE: Implement reference-style navigation [vim_navigation](#vim_navigation)
+    - [x] DONE: Implement and verify navigation [navigation_work](#navigation_work)
+      - [x] DONE: Implement cursor motions and counts [vim_motions](#vim_motions)
+      - [x] DONE: Implement viewport scrolling [vim_scrolling](#vim_scrolling)
+      - [x] DONE: Render navigation feedback [vim_feedback](#vim_feedback)
+      - [x] DONE: Verify navigation behavior [navigation_verify](#navigation_verify)
+  - [x] DONE: Implement interactive history search [vim_search](#vim_search)
+    - [x] DONE: Design and implement search [search_work](#search_work)
+      - [x] DONE: Define search inside Visual mode [search_visual_design](#search_visual_design)
+      - [x] DONE: Implement search prompt transitions [search_prompt](#search_prompt)
+      - [x] DONE: Implement search and match navigation [search_matches](#search_matches)
+      - [x] DONE: Verify search behavior [search_verify](#search_verify)
+  - [x] DONE: Implement Visual selection and yank [vim_selection](#vim_selection)
+    - [x] DONE: Implement and verify Visual selection [selection_work](#selection_work)
+      - [x] DONE: Implement Visual selection ranges [selection_ranges](#selection_ranges)
+      - [x] DONE: Render Visual selection [selection_render](#selection_render)
+      - [x] DONE: Copy Visual selection [selection_yank](#selection_yank)
+      - [x] DONE: Verify selection and copying [selection_verify](#selection_verify)
+  - [x] DONE: Support application-controlled Vim bindings [vim_app_control](#vim_app_control)
+    - [x] DONE: Implement application binding control [app_control_work](#app_control_work)
+      - [x] DONE: Implement buffer-scoped binding control [app_control](#app_control)
+      - [x] DONE: Integrate Neovim lifecycle [nvim_hook](#nvim_hook)
+      - [x] DONE: Verify application binding isolation [app_control_verify](#app_control_verify)
+  - [x] DONE: Validate and document the complete workflow [vim_acceptance](#vim_acceptance)
+    - [x] DONE: Verify real terminal workflows [vim_end_to_end](#vim_end_to_end)
+      - [x] DONE: Compare behavior with plain st [vim_compare](#vim_compare)
+      - [x] DONE: Verify OMP chat navigation [omp_acceptance](#omp_acceptance)
+      - [x] DONE: Verify Neovim and OMP isolation [nvim_acceptance](#nvim_acceptance)
+    - [x] DONE: Document and version Vim mode [vim_release](#vim_release)
+      - [x] DONE: Document Vim mode in repository docs [vim_docs](#vim_docs)
+      - [x] DONE: Bump rmux version for Vim mode [vim_version](#vim_version)
+  - [x] DONE: Make Vim bindings configurable [vim_config](#vim_config)
+    - [x] DONE: Implement and verify configurable bindings [config_work](#config_work)
+      - [x] DONE: Define Vim binding configuration [vim_config_design](#vim_config_design)
+      - [x] DONE: Implement configurable Vim bindings [vim_config_impl](#vim_config_impl)
+      - [x] DONE: Verify configurable Vim bindings [vim_config_verify](#vim_config_verify)
 ## rmux
 
 - Role: material
@@ -1784,4 +1352,436 @@ In the buffer rename prompt, make Ctrl-Backspace delete the preceding word witho
 Fix the rmux client disconnect reported during repeated st floating-mode toggles and when resuming a busy OMP session. Diagnostic logs captured the server disconnecting the client because its 64-message output queue filled; the rmux server and OMP process remained alive. Prevent output bursts from disconnecting clients while preserving terminal output and session responsiveness, and verify resizing and busy OMP sessions.
 
 The user previously observed the problem with one OMP session and more often with two. Missing cursor-position replies were an earlier unconfirmed hypothesis.
+
+## vim_mode
+
+- Scope: coordinated
+- Difficulty: 2 kyu
+- Children: vim_research & vim_history & vim_transitions & vim_navigation & vim_search & vim_selection & vim_app_control & vim_acceptance & vim_config
+- Role: material
+
+Provide Vim-style navigation, search and selection scoped to the focused buffer, following dotFiles st-meta-vim-full unless specified otherwise. Share mode, navigation, search and selection state across windows and attached clients displaying the same buffer; different buffers remain independent. Retain about 2,000 terminal history rows per buffer. Dividers, borders, gaps and unused-space padding are display decorations, not buffer contents: exclude them from history, search, selection and copied text. Insert mode passes ordinary input through; Alt+Escape enters Normal, Alt+d/f enter and scroll, and Ctrl+f opens search. Normal Escape/i returns to Insert; v, V and Ctrl+v enter character, line and block Visual modes. Visual Escape clears selection and returns to Normal; y copies and returns to Insert. Search from Visual retains the selection; comma and semicolon navigate matches. Applications can disable rmux Vim bindings for their buffer, leaving window-management shortcuts available; Neovim integration restores them on exit. OMP should remain navigable. Test initially with st -V; dynamic st control is future work, not a dependency. Do not implement mouse yanks. Difficulty: coordinated changes to terminal history, input, rendering and application control; exact protocol and search interaction need investigation.
+
+## vim_research
+
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Uncertainty: high
+- Role: composite
+- Children: vim_observe & vim_design
+
+Investigate the installed reference and actual OMP rendering, replay and alternate-screen behavior before selecting a history design. High uncertainty: cached sources may differ from the installed binary. No running user sessions should be disturbed.
+
+## vim_history
+
+- Scope: coordinated
+- Difficulty: 3 kyu
+- Role: composite
+- Children: history_work
+- Dependency: vim_history_design & omp_trace
+
+Retain bounded terminal history and provide one shared navigation view per buffer, rendered in every window and attached client displaying it, without disrupting live output processing. Keep dividers, borders, gaps and padding outside the history. Difficulty: resize, replay, alternate screens, concurrent output and multiple clients require careful handling. Depends on the history design and OMP observations.
+
+## vim_transitions
+
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Role: composite
+- Children: transitions_work
+- Dependency: vim_history_design & vim_control_design
+
+Handle Insert, Normal and the three Visual modes per buffer without intercepting application input in Insert mode except agreed entry bindings. Share mode state between windows and attached clients displaying the same buffer, while keeping different buffers independent. Difficulty: state and input routing must remain consistent across clients. Depends on the view representation and application-control design.
+
+## vim_navigation
+
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Role: composite
+- Children: navigation_work
+- Dependency: history_views & transitions_verify & vim_reference
+
+Reproduce relevant st motions, counts, scrolling and cursor feedback in a shared buffer history view. Difficulty: movement across history, wrapped rows and resize must remain consistent. Depends on history access and mode transitions.
+
+## vim_search
+
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Role: composite
+- Children: search_work
+- Dependency: navigation_verify & vim_reference
+
+Reproduce reference search and highlighting in buffer content, sharing search state across views of the same buffer while preserving the originating Normal or Visual context. Exclude dividers, borders, gaps and padding from search. Difficulty: Visual search interaction needs explicit design. Depends on navigation and the reference behavior catalog.
+
+## vim_selection
+
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Role: composite
+- Children: selection_work
+- Dependency: navigation_verify & visual_entry
+
+Select and copy only the focused buffer content, with character, line and rectangular shapes and reference-style feedback. Share selection across windows and clients displaying that buffer; exclude dividers, borders, gaps and padding. Difficulty: terminal cells, wide characters and line boundaries affect copied text. Depends on navigation and Visual entry.
+
+## vim_app_control
+
+- Scope: coordinated
+- Difficulty: 3 kyu
+- Role: composite
+- Children: app_control_work
+- Dependency: vim_control_design
+
+Provide buffer-scoped enable and disable controls and a Neovim hook, without disabling rmux window shortcuts. Difficulty: restoration, nesting and unexpected exits need reliable semantics. Depends on application-control design.
+
+## vim_acceptance
+
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Dependency: vim_navigation & vim_search & vim_selection & vim_app_control & vim_config
+- Role: composite
+- Children: vim_end_to_end & vim_release
+
+Compare real st and rmux interactions, verify OMP and Neovim end to end, document the feature and bump the package version. Difficulty: terminal lifecycle and real application behavior need integration testing. Depends on navigation, search, selection, application control and configurable bindings.
+
+## vim_config
+
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Dependency: vim_navigation & vim_search & vim_selection
+- Role: composite
+- Children: config_work
+
+Allow users to configure Vim-mode actions and keybindings using the existing rmux configuration. Preserve the agreed st-style bindings as defaults, while supporting alternatives such as n and Shift+n for search matches. Difficulty: mode-specific input and conflicts with other bindings need a clear resolution. Depends on the Vim navigation, search and selection behavior.
+
+## vim_observe
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: vim_reference & omp_replay & omp_trace
+
+Investigate reference and OMP behavior. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
+
+## vim_reference
+
+- Role: atomic
+
+Inspected dotFiles/st-0.8.5/normalMode.c, config.h, st.c and x.c. Reference supports counted movement, word motions, search with smart case, comma/semicolon match movement, three Visual shapes, text-object yanks and clipboard feedback. Keep specified rmux differences, including buffer scope and no mouse yanks.
+
+## omp_replay
+
+- Role: atomic
+
+The dotfiles OMP extension omp/agent/extensions/rerender.ts registers /rerender and calls ctx.reload(). An isolated --no-session PTY run emitted two CSI 3 J scrollback clears on /rerender, without entering the alternate screen; it exited normally.
+
+## omp_trace
+
+- Role: atomic
+
+Isolated --no-session OMP PTY runs exercised startup, resize, a synthetic shell-output transcript, /rerender and normal exit without touching active sessions. Resize temporarily entered and left the alternate screen and cleared scrollback; /rerender cleared scrollback and replayed the synthetic marker. A real chat remains required in OMP acceptance testing.
+
+## vim_design
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: vim_history_design & vim_control_design
+- Dependency: vim_observe
+
+Choose history and control designs. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
+
+## vim_history_design
+
+- Role: atomic
+
+Keep the authoritative vt100 parser and approximately 2,000 scrollback rows in each server buffer. Maintain one navigation position per buffer, synchronized across clients and windows. Send historical snapshots separately from the live client parser, leaving live PTY output and terminal replies active. Clamp or rebase view and selection across eviction, resize, CSI 3 J replay and temporary alternate-screen transitions; exclude rmux decorations.
+
+## vim_control_design
+
+- Role: atomic
+
+Applications send an OSC 777;rmux-app;acquire|release;PID request through their buffer PTY. The server tracks requesting process identities by PID and process start time, scopes each request to the originating buffer, prunes dead owners and leaves unrelated rmux shortcuts enabled. The Neovim hook acquires on entry and resume, and releases on suspend and exit; a remaining live owner keeps bindings disabled.
+
+## history_work
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: history_capacity & history_access & history_views & history_lifecycle & history_verify
+
+Implement and verify buffer history. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
+
+## history_capacity
+
+- Role: atomic
+
+Set the agreed approximate 2,000-row bound and define how overflow evicts old rows.
+
+## history_access
+
+- Role: atomic
+
+Provide historical terminal cells for buffer navigation while preserving attributes and the live screen; exclude rmux decorations.
+
+## history_views
+
+- Role: atomic
+
+Store one navigation position per buffer, shared across its windows and attached clients; keep different buffers independent.
+
+## history_lifecycle
+
+- Role: atomic
+
+Keep view positions and selections valid through output, eviction, reset, replay and resize.
+
+## history_verify
+
+- Role: atomic
+
+Test bounds, shared views across windows and attached clients, isolation between buffers, differently sized windows, attach, live output, resize, resets and OMP replay as applicable. Verify decorations never enter history.
+
+## transitions_work
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: vim_entry & vim_exit & visual_entry & visual_escape & transitions_verify
+
+Implement and verify mode transitions. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
+
+## vim_entry
+
+- Role: atomic
+
+Implement Alt+Escape and Alt+d/f from Insert, including five-row scrolling.
+
+## vim_exit
+
+- Role: atomic
+
+Return to Insert on Escape or i and restore ordinary input routing.
+
+## visual_entry
+
+- Role: atomic
+
+Enter character, line or block Visual mode using v, V or Ctrl+v from Normal.
+
+## visual_escape
+
+- Role: atomic
+
+Clear the selection and return to Normal on Escape.
+
+## transitions_verify
+
+- Role: atomic
+
+Test each agreed transition, shared state across windows and clients, isolation between buffers and unbound application input.
+
+## navigation_work
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: vim_motions & vim_scrolling & vim_feedback & navigation_verify
+
+Implement and verify navigation. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
+
+## vim_motions
+
+- Role: atomic
+
+Implement reference movement commands and numeric counts over buffer history.
+
+## vim_scrolling
+
+- Role: atomic
+
+Implement reference scrolling commands and keep the navigation cursor visible.
+
+## vim_feedback
+
+- Role: atomic
+
+Render the shared navigation cursor and mode feedback in windows displaying the buffer without affecting different buffers.
+
+## navigation_verify
+
+- Role: atomic
+
+Test motions, counts, scroll bounds, focus, shared buffer views across windows and attached clients, and isolation between buffers.
+
+## search_work
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: search_visual_design & search_prompt & search_matches & search_verify
+
+Design and implement search. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
+
+## search_visual_design
+
+- Role: atomic
+
+Specify prompt cancellation, confirmation, match navigation and selection-anchor behavior with the user before implementation.
+
+## search_prompt
+
+- Role: atomic
+
+Open search with Ctrl+f from Insert, Normal and Visual; return to the appropriate context on confirmation or cancellation.
+
+## search_matches
+
+- Role: atomic
+
+Implement incremental smart-case search, match highlighting, comma forward and semicolon backward, plus applicable reference search bindings.
+
+## search_verify
+
+- Role: atomic
+
+Test case sensitivity, both directions, no matches, prompt transitions, shared state across views, isolation between buffers, decoration exclusion and Visual selection retention.
+
+## selection_work
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: selection_ranges & selection_render & selection_yank & selection_verify
+
+Implement and verify Visual selection. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
+
+## selection_ranges
+
+- Role: atomic
+
+Track character, whole-line and rectangular selection from anchor to cursor.
+
+## selection_render
+
+- Role: atomic
+
+Highlight selected buffer cells in every window displaying that buffer, without highlighting decorations or different buffers.
+
+## selection_yank
+
+- Role: atomic
+
+Yank the selected text to the clipboard, provide feedback and return to Insert.
+
+## selection_verify
+
+- Role: atomic
+
+Test each shape, reversed endpoints, text boundaries, clipboard content, shared selection across windows and clients, and isolation between buffers. Verify differently sized windows and scrolling never select or copy dividers, borders, gaps or padding.
+
+## app_control_work
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: app_control & nvim_hook & app_control_verify
+
+Implement application binding control. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
+
+## app_control
+
+- Role: atomic
+
+Provide an application-accessible control for disabling and restoring rmux Vim bindings in the correct buffer.
+
+## nvim_hook
+
+- Role: atomic
+
+Provide a minimal Neovim Lua integration that disables rmux Vim bindings while active and restores them on exit.
+
+## app_control_verify
+
+- Role: atomic
+
+Test Neovim lifecycle, restoration and other buffers, including relevant failure and nesting cases.
+
+## config_work
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: vim_config_design & vim_config_impl & vim_config_verify
+
+Implement and verify configurable bindings. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
+
+## vim_config_design
+
+- Role: atomic
+
+Specify how users map keys to Vim actions, including mode-specific bindings and conflicts, consistently with existing rmux configuration.
+
+## vim_config_impl
+
+- Role: atomic
+- Dependency: vim_config_design
+
+Apply configured Vim bindings while retaining the agreed defaults for omitted settings.
+
+## vim_config_verify
+
+- Role: atomic
+- Dependency: vim_config_impl
+
+Test default bindings and overrides, including n and Shift+n for next and previous search matches, and mode-specific conflicts.
+
+## vim_end_to_end
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: vim_compare & omp_acceptance & nvim_acceptance
+
+Verify real terminal workflows. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
+
+## vim_compare
+
+- Role: atomic
+
+Exercise matching navigation, search and selection scenarios in st and rmux using st -V for rmux.
+
+## omp_acceptance
+
+- Role: atomic
+
+Navigate, search and copy earlier OMP conversation output while OMP is running, including after re-render.
+
+## nvim_acceptance
+
+- Role: atomic
+
+Confirm Neovim receives its bindings while OMP remains navigable in another buffer.
+
+## vim_release
+
+- Role: molecule
+- Scope: coordinated
+- Difficulty: 4 kyu
+- Children: vim_docs & vim_version
+- Dependency: vim_end_to_end & vim_config
+
+Document and version Vim mode. Scope: coordinate the listed tasks as one reviewable outcome. Difficulty: follow the parent task and its dependencies; resolve open questions before implementation.
+
+## vim_docs
+
+- Role: atomic
+- Dependency: vim_config & vim_compare & omp_acceptance & nvim_acceptance
+
+Document Vim mode in the repository docs, including default and configurable bindings with an n and Shift+n search example, 2,000-row history, shared buffer-scoped navigation and selection, application control, st -V setup and intentional differences from st.
+
+## vim_version
+
+- Role: atomic
+- Dependency: vim_docs
+
+After implementation, verification and documentation, update the package version in Cargo.toml and affected lockfile metadata according to the repository Semantic Versioning policy; verify the resulting package version.
 

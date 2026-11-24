@@ -1,7 +1,7 @@
 -- Buffer-scoped rmux application control for Neovim running in an rmux buffer.
 --
 -- Protocol: OSC 777;rmux-app;acquire|release;<pid> terminated by ST. The
--- sequence is written to this process's controlling terminal, so rmux
+-- sequence is sent to the host terminal through Neovim's UI, so rmux
 -- associates it with the buffer running Neovim. It changes only that buffer's
 -- application-control state; other rmux shortcuts and buffers are unaffected.
 -- Each nested process owns its own PID request. rmux must prune dead
@@ -13,18 +13,8 @@ local state = vim.g.rmux_app_control_state or { active = false }
 vim.g.rmux_app_control_state = state
 
 local function send(action)
-  local ok, tty = pcall(io.open, "/dev/tty", "wb")
-  if not ok or not tty then
-    return false
-  end
-
   local sequence = string.format("\27]777;rmux-app;%s;%d\27\\", action, vim.fn.getpid())
-  local wrote = pcall(function()
-    assert(tty:write(sequence))
-    assert(tty:flush())
-  end)
-  pcall(function() tty:close() end)
-  return wrote
+  return pcall(vim.api.nvim_ui_send, sequence)
 end
 
 local function acquire()

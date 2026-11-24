@@ -5,6 +5,8 @@ mod layout;
 mod render;
 mod runtime;
 mod server;
+mod vim;
+mod vim_control;
 
 use config::Config;
 use runtime::SessionPaths;
