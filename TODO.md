@@ -1477,7 +1477,7 @@ The dotfiles OMP extension omp/agent/extensions/rerender.ts registers /rerender 
 
 - Role: atomic
 
-Isolated --no-session OMP PTY runs exercised startup, resize, a synthetic shell-output transcript, /rerender and normal exit without touching active sessions. Resize temporarily entered and left the alternate screen and cleared scrollback; /rerender cleared scrollback and replayed the synthetic marker. A real chat remains required in OMP acceptance testing.
+Isolated --no-session OMP PTY runs exercised startup, resize, a synthetic shell-output transcript, /rerender and normal exit without touching active sessions. Resize temporarily entered and left the alternate screen and cleared scrollback; /rerender cleared scrollback and replayed the synthetic marker. Subsequent acceptance tested a real local Ollama assistant response inside rmux: Vim search and yank returned the exact marker before and after /rerender.
 
 ## vim_design
 
