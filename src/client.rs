@@ -212,8 +212,6 @@ pub(crate) fn attach(
     crate::debug_log(format_args!("client connected session={name} size={cols}x{rows}"));
     writer.set_read_timeout(None)?;
     writer.set_write_timeout(None)?;
-    let mut server = reader.into_inner();
-    drop(writer);
     let interrupted = Arc::new(AtomicBool::new(false));
     for signal in [
         signal_hook::consts::SIGTERM,
@@ -225,7 +223,7 @@ pub(crate) fn attach(
 
     let stdin = io::stdin();
     let stdin_fd = stdin.as_raw_fd();
-    let server_fd = server.as_raw_fd();
+    let server_fd = reader.get_ref().as_raw_fd();
     let stdout = io::stdout();
     let mut output = stdout.lock();
     let mut input = stdin.lock();
@@ -240,7 +238,7 @@ pub(crate) fn attach(
     loop {
         if interrupted.load(Ordering::Acquire) {
             crate::debug_log(format_args!("client interrupted session={name}"));
-            let _ = write_frame(&mut server, 3, &[]);
+            let _ = write_frame(&mut writer, 3, &[]);
             break;
         }
         if rename_prompt.as_ref().is_some_and(|prompt: &RenamePrompt| {
@@ -254,7 +252,7 @@ pub(crate) fn attach(
             let keep_escape_timeout =
                 matches!(&action, InputAction::Bytes(bytes) if bytes.ends_with(&[0x1b]));
             handle_input_action(
-                &mut server,
+                &mut writer,
                 &mut input_decoder,
                 &mut renderer,
                 &mut rename_prompt,
@@ -269,7 +267,7 @@ pub(crate) fn attach(
         if vim_escape_started
             .is_some_and(|started: Instant| started.elapsed() >= PROMPT_ESCAPE_TIMEOUT)
         {
-            write_frame(&mut server, VIM_FLUSH, &[])?;
+            write_frame(&mut writer, VIM_FLUSH, &[])?;
             vim_escape_started = None;
         }
         let now = Instant::now();
@@ -280,7 +278,8 @@ pub(crate) fn attach(
         if let Some(started) = vim_escape_started {
             timeout = timeout.min(PROMPT_ESCAPE_TIMEOUT.saturating_sub(now.duration_since(started)));
         }
-        let timeout = timeout.as_millis().clamp(1, 100) as i32;
+        let server_data_buffered = !reader.buffer().is_empty();
+        let timeout = if server_data_buffered { 0 } else { timeout.as_millis().clamp(1, 100) as i32 };
         let mut descriptors = [
             libc::pollfd {
                 fd: stdin_fd,
@@ -307,11 +306,11 @@ pub(crate) fn attach(
             let length = input.read(&mut input_buffer)?;
             if length == 0 {
                 crate::debug_log(format_args!("client terminal input closed session={name}"));
-                let _ = write_frame(&mut server, 3, &[]);
+                let _ = write_frame(&mut writer, 3, &[]);
                 break;
             }
             send_input(
-                &mut server,
+                &mut writer,
                 &mut input_decoder,
                 &mut renderer,
                 &mut rename_prompt,
@@ -323,8 +322,8 @@ pub(crate) fn attach(
             vim_escape_started =
                 ends_with_unpaired_escape(raw_input, vim_escape_started.is_some()).then(Instant::now);
         }
-        if descriptors[1].revents & libc::POLLIN != 0 {
-            match read_frame(&mut server)? {
+        if descriptors[1].revents & libc::POLLIN != 0 || !reader.buffer().is_empty() {
+            match read_frame(&mut reader)? {
                 Some((BUFFER_SNAPSHOT, bytes)) => {
                     renderer.apply_frame(BUFFER_SNAPSHOT, &bytes)?;
                     renderer.draw(&mut output, last_size.0, last_size.1)?;
@@ -384,7 +383,7 @@ pub(crate) fn attach(
                 let mut payload = Vec::with_capacity(4);
                 payload.extend_from_slice(&size.1.max(1).to_be_bytes());
                 payload.extend_from_slice(&size.0.max(1).to_be_bytes());
-                write_frame(&mut server, RESIZE, &payload)?;
+                write_frame(&mut writer, RESIZE, &payload)?;
                 last_size = size;
                 renderer.draw(&mut output, last_size.0, last_size.1)?;
             }
@@ -496,6 +495,33 @@ fn handle_input_action(
             }
             Ok(())
         }
+    }
+}
+#[cfg(test)]
+mod handshake_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn response_and_initial_frame_in_one_write_are_both_read() {
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        let mut payload = b"{\"ok\":true,\"name\":\"test\",\"supports_resize_step\":true}\n".to_vec();
+        payload.extend_from_slice(&[BUFFER_SNAPSHOT, 0, 0, 0, 12]);
+        payload.extend_from_slice(&1u64.to_be_bytes());
+        payload.extend_from_slice(&24u16.to_be_bytes());
+        payload.extend_from_slice(&80u16.to_be_bytes());
+        sender.write_all(&payload).unwrap();
+        drop(sender);
+
+        let mut reader = std::io::BufReader::new(receiver);
+        let response = read_response(&mut reader).unwrap();
+        assert!(response.ok);
+        let (kind, frame) = read_frame(&mut reader).unwrap().unwrap();
+        assert_eq!(kind, BUFFER_SNAPSHOT);
+        assert_eq!(&frame[..8], &1u64.to_be_bytes());
+        assert_eq!(&frame[8..10], &24u16.to_be_bytes());
+        assert_eq!(&frame[10..12], &80u16.to_be_bytes());
+        assert!(read_frame(&mut reader).unwrap().is_none());
     }
 }
 

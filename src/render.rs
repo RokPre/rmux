@@ -7,7 +7,7 @@ use crossterm::style::{
     Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use vt100::{Color as VtColor, Parser};
+use vt100::{Cell, Color as VtColor, Parser, Screen};
 
 use crate::layout::{Divider, LayoutGeometry, LayoutSnapshot, PaneRect};
 use crate::input::InputContext;
@@ -36,6 +36,15 @@ struct VimView {
     history_len: usize,
     scrollback: usize,
 }
+fn incremental_view(view: &VimView) -> bool {
+    view.mode == "insert"
+        && !view.app_control
+        && view.selection.is_none()
+        && view.yank_selection.is_none()
+        && view.matches.is_empty()
+        && view.prompt.is_none()
+        && view.scrollback == 0
+}
 
 pub(crate) struct Renderer {
     snapshot: Option<LayoutSnapshot>,
@@ -46,7 +55,19 @@ pub(crate) struct Renderer {
     prompt: Option<(String, usize)>,
     bracketed_paste: Option<bool>,
     config: crate::config::Config,
+    safe_output: Option<u64>,
+    rendered: Vec<RenderedPane>,
 }
+
+struct RenderedPane {
+    window: u64,
+    buffer: u64,
+    rect: PaneRect,
+    origin: (u16, u16, u16, u16),
+    terminal: (u16, u16),
+    cells: Vec<Option<Cell>>,
+}
+
 
 impl Default for Renderer {
     fn default() -> Self {
@@ -65,11 +86,15 @@ impl Renderer {
             prompt: None,
             bracketed_paste: None,
             config,
+            safe_output: None,
+            rendered: Vec::new(),
         }
     }
     pub(crate) fn apply_frame(&mut self, kind: u8, payload: &[u8]) -> io::Result<()> {
         match kind {
             BUFFER_SNAPSHOT => {
+                self.safe_output = None;
+                self.rendered.clear();
                 if payload.len() < 12 {
                     return Err(invalid_frame("short buffer snapshot"));
                 }
@@ -89,13 +114,19 @@ impl Renderer {
                     return Err(invalid_frame("short buffer output"));
                 }
                 let buffer = read_u64(payload, 0);
+                let bytes = &payload[8..];
                 let parser = self
                     .parsers
                     .get_mut(&buffer)
                     .ok_or_else(|| invalid_frame("buffer output before snapshot"))?;
-                parser.process(&payload[8..]);
+                self.safe_output = (!bytes.is_empty()
+                    && bytes.iter().all(|byte| (0x20..=0x7e).contains(byte)))
+                .then_some(buffer);
+                parser.process(bytes);
             }
             crate::server::HISTORY_SNAPSHOT => {
+                self.safe_output = None;
+                self.rendered.clear();
                 if payload.len() < 16 {
                     return Err(invalid_frame("short history snapshot"));
                 }
@@ -129,14 +160,25 @@ impl Renderer {
             VIM_STATE => {
                 let view: VimView = serde_json::from_slice(payload)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                let preserve = self.vim.get(&view.buffer).is_some_and(|previous| {
+                    incremental_view(previous)
+                        && incremental_view(&view)
+                        && previous.history_len == view.history_len
+                        && previous.scrollback == view.scrollback
+                });
+                if !preserve {
+                    self.safe_output = None;
+                    self.rendered.clear();
+                }
                 self.vim.insert(view.buffer, view);
             }
             _ => return Err(invalid_frame("invalid renderer frame")),
         }
         Ok(())
     }
-
     pub(crate) fn set_layout(&mut self, snapshot: LayoutSnapshot) {
+        self.safe_output = None;
+        self.rendered.clear();
         self.parsers
             .retain(|buffer, _| snapshot.buffers.contains(buffer));
         self.history_parsers
@@ -183,11 +225,11 @@ impl Renderer {
             .as_ref()
             .is_some_and(|snapshot| snapshot.buffers.contains(&buffer))
     }
-
     pub(crate) fn set_prompt(&mut self, prompt: Option<(String, usize)>) {
+        self.safe_output = None;
+        self.rendered.clear();
         self.prompt = prompt;
     }
-
     pub(crate) fn draw(&mut self, output: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return Ok(());
@@ -227,6 +269,18 @@ impl Renderer {
                 draw_buffer_line(output, snapshot, cols, &geometry, &self.config)?;
             }
         }
+        let can_cache = self.prompt.is_none()
+            && rows >= 3
+            && geometry.windows.iter().all(|placement| {
+                !self.history_parsers.contains_key(&placement.buffer)
+                    && self.vim.get(&placement.buffer).is_some_and(incremental_view)
+                    && self.parsers.get(&placement.buffer).is_some_and(|parser| {
+                        !parser.screen().alternate_screen()
+                    })
+            });
+        let can_diff = can_cache && self.safe_output.is_some();
+        let mut next_rendered = Vec::new();
+        let mut old_rendered = std::mem::take(&mut self.rendered);
         for placement in &geometry.windows {
             let view = self.vim.get(&placement.buffer);
             let history_offset = self
@@ -237,17 +291,61 @@ impl Renderer {
             let absolute_top = view.map_or(0, |view| {
                 view.history_len.saturating_sub(history_offset)
             });
-            draw_pane(
-                output,
-                placement.rect,
-                self.history_parsers
-                    .get(&placement.buffer)
-                    .or_else(|| self.parsers.get(&placement.buffer)),
-                view,
-                absolute_top,
-                &self.config,
-            )?;
+            let parser = self
+                .history_parsers
+                .get(&placement.buffer)
+                .or_else(|| self.parsers.get(&placement.buffer));
+            let origin = parser.map(|parser| {
+                let size = parser.screen().size();
+                centered_origin(placement.rect, (size.0.get(), size.1.get()))
+            });
+            let prior = old_rendered
+                .iter()
+                .position(|prior| {
+                    can_diff
+                        && prior.window == placement.id
+                        && prior.buffer == placement.buffer
+                        && prior.rect == placement.rect
+                        && Some(prior.origin) == origin
+                        && prior.terminal == (cols, rows)
+                })
+                .map(|index| old_rendered.remove(index));
+            if can_diff
+                && Some(placement.buffer) != self.safe_output
+                && prior.is_some()
+            {
+                next_rendered.push(prior.unwrap());
+                continue;
+            }
+            if let (Some(parser), Some(origin)) = (parser, origin) {
+                let current = can_cache.then(|| rendered_cells(parser.screen(), origin));
+                if let Some(prior) = prior.as_ref() {
+                    draw_pane_diff(
+                        output,
+                        placement.rect,
+                        origin,
+                        current.as_deref().unwrap(),
+                        prior,
+                    )?;
+                } else {
+                    draw_pane(output, placement.rect, Some(parser), view, absolute_top, &self.config)?;
+                }
+                if let Some(cells) = current {
+                    next_rendered.push(RenderedPane {
+                        window: placement.id,
+                        buffer: placement.buffer,
+                        rect: placement.rect,
+                        origin,
+                        terminal: (cols, rows),
+                        cells,
+                    });
+                }
+            } else {
+                draw_pane(output, placement.rect, parser, view, absolute_top, &self.config)?;
+            }
         }
+        self.rendered = next_rendered;
+        self.safe_output = None;
         draw_dividers(output, &geometry, &self.config)?;
         if let Some((prompt, cursor_byte)) = self.prompt.as_ref() {
             if rows >= 3 && cols > 0 {
@@ -572,6 +670,75 @@ fn draw_pane(
     }
     queue!(output, SetAttribute(Attribute::Reset))
 }
+fn rendered_cells(
+    screen: &Screen,
+    origin: (u16, u16, u16, u16),
+) -> Vec<Option<Cell>> {
+    let (_, _, width, height) = origin;
+    let mut cells = Vec::with_capacity(usize::from(width) * usize::from(height));
+    for row in 0..height {
+        for col in 0..width {
+            cells.push(screen.cell(row, col).cloned());
+        }
+    }
+    cells
+}
+
+fn draw_pane_diff(
+    output: &mut impl Write,
+    _rect: PaneRect,
+    origin: (u16, u16, u16, u16),
+    current: &[Option<Cell>],
+    previous: &RenderedPane,
+) -> io::Result<()> {
+    let (x, y, width, _) = origin;
+    let mut previous_style = None;
+    for (index, cell) in current.iter().enumerate() {
+        if previous.cells.get(index) == Some(cell) {
+            continue;
+        }
+        if cell.as_ref().is_some_and(|cell| cell.is_wide_continuation()) {
+            continue;
+        }
+        let row = index / usize::from(width);
+        let col = index % usize::from(width);
+        let style = cell.as_ref().map_or(
+            CellStyle {
+                foreground: Color::Reset,
+                background: Color::Reset,
+                bold: false,
+                dim: false,
+                italic: false,
+                underline: false,
+                inverse: false,
+            },
+            |cell| CellStyle {
+                foreground: convert_color(cell.fgcolor()),
+                background: convert_color(cell.bgcolor()),
+                bold: cell.bold(),
+                dim: cell.dim(),
+                italic: cell.italic(),
+                underline: cell.underline(),
+                inverse: cell.inverse(),
+            },
+        );
+        queue!(output, MoveTo(x + col as u16, y + row as u16))?;
+        apply_cell_style(output, previous_style, style)?;
+        previous_style = Some(style);
+        queue!(
+            output,
+            Print(cell.as_ref().map_or(" ", |cell| {
+                if cell.contents().is_empty() {
+                    " "
+                } else {
+                    cell.contents()
+                }
+            }))
+        )?;
+    }
+    queue!(output, SetAttribute(Attribute::Reset))
+}
+
 
 fn bracketed_paste_enabled(
     prompt_active: bool,
@@ -626,21 +793,23 @@ fn match_contains(view: &VimView, row: usize, col: u16) -> bool {
 }
 
 fn apply_match_style(style: &mut CellStyle, selected: bool, yanked: bool, matched: bool, active_match: bool) {
-    if yanked {
-        style.foreground = Color::Black;
-        style.background = Color::Rgb { r: 255, g: 165, b: 0 };
+    // Tokyo Night palette from dotFiles/globalTheme.toml.
+    let background = Color::Rgb { r: 0x1a, g: 0x1b, b: 0x26 };
+    let foreground = Color::Rgb { r: 0xc0, g: 0xca, b: 0xf5 };
+    let blue = Color::Rgb { r: 0x7a, g: 0xa2, b: 0xf7 };
+    let orange = Color::Rgb { r: 0xff, g: 0x9e, b: 0x64 };
+    let selection = Color::Rgb { r: 0x28, g: 0x34, b: 0x57 };
+    if yanked || (!selected && active_match) {
+        style.foreground = background;
+        style.background = orange;
         style.inverse = false;
     } else if selected {
-        style.foreground = Color::White;
-        style.background = Color::Rgb { r: 35, g: 90, b: 190 };
-        style.inverse = false;
-    } else if active_match {
-        style.foreground = Color::Black;
-        style.background = Color::Rgb { r: 255, g: 165, b: 0 };
+        style.foreground = foreground;
+        style.background = selection;
         style.inverse = false;
     } else if matched {
-        style.foreground = Color::White;
-        style.background = Color::Rgb { r: 35, g: 90, b: 190 };
+        style.foreground = background;
+        style.background = blue;
         style.inverse = false;
     }
 }
@@ -1647,21 +1816,21 @@ mod tests {
         };
 
         apply_match_style(&mut style, false, false, true, false);
-        assert_eq!(style.foreground, Color::White);
-        assert_eq!(style.background, Color::Rgb { r: 35, g: 90, b: 190 });
+        assert_eq!(style.foreground, Color::Rgb { r: 0x1a, g: 0x1b, b: 0x26 });
+        assert_eq!(style.background, Color::Rgb { r: 0x7a, g: 0xa2, b: 0xf7 });
         assert!(!style.inverse);
 
         apply_match_style(&mut style, false, false, true, true);
-        assert_eq!(style.foreground, Color::Black);
-        assert_eq!(style.background, Color::Rgb { r: 255, g: 165, b: 0 });
+        assert_eq!(style.foreground, Color::Rgb { r: 0x1a, g: 0x1b, b: 0x26 });
+        assert_eq!(style.background, Color::Rgb { r: 0xff, g: 0x9e, b: 0x64 });
 
         apply_match_style(&mut style, true, false, true, true);
-        assert_eq!(style.foreground, Color::White);
-        assert_eq!(style.background, Color::Rgb { r: 35, g: 90, b: 190 });
+        assert_eq!(style.foreground, Color::Rgb { r: 0xc0, g: 0xca, b: 0xf5 });
+        assert_eq!(style.background, Color::Rgb { r: 0x28, g: 0x34, b: 0x57 });
         assert!(!style.inverse);
         apply_match_style(&mut style, true, true, true, true);
-        assert_eq!(style.foreground, Color::Black);
-        assert_eq!(style.background, Color::Rgb { r: 255, g: 165, b: 0 });
+        assert_eq!(style.foreground, Color::Rgb { r: 0x1a, g: 0x1b, b: 0x26 });
+        assert_eq!(style.background, Color::Rgb { r: 0xff, g: 0x9e, b: 0x64 });
     }
     #[test]
     fn yank_flash_history_view_keeps_live_bracketed_paste_enabled() {
@@ -1671,4 +1840,176 @@ mod tests {
         assert!(!bracketed_paste_enabled(false, true, true, false));
     }
 
+    #[test]
+    fn incremental_pane_redraw_writes_changed_cells_and_clears_wide_tail() {
+        let mut parser = Parser::new(
+            std::num::NonZeroU16::new(1).unwrap(),
+            std::num::NonZeroU16::new(4).unwrap(),
+            0,
+        );
+        parser.process("界".as_bytes());
+        let origin = (0, 0, 4, 1);
+        let prior = RenderedPane {
+            window: 1,
+            buffer: 1,
+            rect: PaneRect { x: 0, y: 0, width: 4, height: 1 },
+            origin,
+            terminal: (4, 3),
+            cells: rendered_cells(parser.screen(), origin),
+        };
+
+        parser.process(b"\x1b[1;1Ha");
+        let current = rendered_cells(parser.screen(), origin);
+        let mut output = Vec::new();
+        draw_pane_diff(&mut output, prior.rect, origin, &current, &prior).unwrap();
+        assert!(output.windows(1).any(|bytes| bytes == b"a"));
+        assert!(output.windows(1).any(|bytes| bytes == b" "));
+        assert!(output.len() < 100);
+    }
+
+    #[test]
+    fn ordinary_insert_output_does_not_redraw_the_entire_pane() {
+        let mut renderer = Renderer::default();
+        let mut snapshot = Vec::from(1u64.to_be_bytes());
+        snapshot.extend_from_slice(&24u16.to_be_bytes());
+        snapshot.extend_from_slice(&80u16.to_be_bytes());
+        renderer.apply_frame(BUFFER_SNAPSHOT, &snapshot).unwrap();
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 1 },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1],
+            buffer_names: HashMap::new(),
+        });
+        let state = serde_json::json!({
+            "buffer": 1,
+            "mode": "insert",
+            "cursor_row": 0,
+            "cursor_col": 0,
+            "selection": null,
+            "matches": [],
+            "active_match": null,
+            "prompt": null,
+            "app_control": false,
+            "history_len": 0,
+            "scrollback": 0
+        });
+        renderer
+            .apply_frame(VIM_STATE, &serde_json::to_vec(&state).unwrap())
+            .unwrap();
+        renderer.draw(&mut Vec::new(), 80, 24).unwrap();
+
+        let mut output_frame = Vec::from(1u64.to_be_bytes());
+        output_frame.push(b'x');
+        renderer.apply_frame(BUFFER_OUTPUT, &output_frame).unwrap();
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 80, 24).unwrap();
+        assert!(output.windows(1).any(|bytes| bytes == b"x"));
+        assert!(output.len() < 500, "incremental draw wrote {} bytes", output.len());
+    }
+    #[test]
+    fn split_views_diff_duplicates_and_layout_change_invalidates_cache() {
+        let mut renderer = Renderer::default();
+        let mut snapshot = Vec::from(1u64.to_be_bytes());
+        snapshot.extend_from_slice(&24u16.to_be_bytes());
+        snapshot.extend_from_slice(&80u16.to_be_bytes());
+        renderer.apply_frame(BUFFER_SNAPSHOT, &snapshot).unwrap();
+        let layout = |ratio| LayoutSnapshot {
+            tree: crate::layout::WindowNode::Split {
+                axis: crate::layout::Axis::Vertical,
+                ratio,
+                first: Box::new(crate::layout::WindowNode::Window { id: 1, buffer: 1 }),
+                second: Box::new(crate::layout::WindowNode::Window { id: 2, buffer: 1 }),
+            },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1],
+            buffer_names: HashMap::new(),
+        };
+        renderer.set_layout(layout(50));
+        let state = serde_json::json!({
+            "buffer": 1,
+            "mode": "insert",
+            "cursor_row": 0,
+            "cursor_col": 0,
+            "selection": null,
+            "matches": [],
+            "active_match": null,
+            "prompt": null,
+            "app_control": false,
+            "history_len": 0,
+            "scrollback": 0
+        });
+        renderer
+            .apply_frame(VIM_STATE, &serde_json::to_vec(&state).unwrap())
+            .unwrap();
+        renderer.draw(&mut Vec::new(), 80, 24).unwrap();
+
+        let mut frame = Vec::from(1u64.to_be_bytes());
+        frame.push(b'x');
+        renderer.apply_frame(BUFFER_OUTPUT, &frame).unwrap();
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 80, 24).unwrap();
+        assert_eq!(output.iter().filter(|&&byte| byte == b'x').count(), 2);
+        assert!(output.len() < 500);
+
+        renderer.set_layout(layout(45));
+        frame.truncate(8);
+        frame.push(b'y');
+        renderer.apply_frame(BUFFER_OUTPUT, &frame).unwrap();
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 80, 24).unwrap();
+        assert!(output.len() > 500, "layout change must force a full redraw");
+    }
+    #[test]
+    fn split_redraw_skips_unchanged_other_buffer_pane() {
+        let mut renderer = Renderer::default();
+        for (id, initial) in [(1u64, b"".as_slice()), (2, b"z".as_slice())] {
+            let mut snapshot = Vec::from(id.to_be_bytes());
+            snapshot.extend_from_slice(&24u16.to_be_bytes());
+            snapshot.extend_from_slice(&80u16.to_be_bytes());
+            snapshot.extend_from_slice(initial);
+            renderer.apply_frame(BUFFER_SNAPSHOT, &snapshot).unwrap();
+        }
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Split {
+                axis: crate::layout::Axis::Vertical,
+                ratio: 50,
+                first: Box::new(crate::layout::WindowNode::Window { id: 1, buffer: 1 }),
+                second: Box::new(crate::layout::WindowNode::Window { id: 2, buffer: 2 }),
+            },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1, 2],
+            buffer_names: HashMap::new(),
+        });
+        for id in [1u64, 2] {
+            let state = serde_json::json!({
+                "buffer": id,
+                "mode": "insert",
+                "cursor_row": 0,
+                "cursor_col": 0,
+                "selection": null,
+                "matches": [],
+                "active_match": null,
+                "prompt": null,
+                "app_control": false,
+                "history_len": 0,
+                "scrollback": 0
+            });
+            renderer
+                .apply_frame(VIM_STATE, &serde_json::to_vec(&state).unwrap())
+                .unwrap();
+        }
+        renderer.draw(&mut Vec::new(), 80, 24).unwrap();
+
+        let mut frame = Vec::from(1u64.to_be_bytes());
+        frame.push(b'x');
+        renderer.apply_frame(BUFFER_OUTPUT, &frame).unwrap();
+        let mut output = Vec::new();
+        renderer.draw(&mut output, 80, 24).unwrap();
+        assert!(output.windows(1).any(|byte| byte == b"x"));
+        assert!(!output.windows(1).any(|byte| byte == b"z"));
+        assert!(output.len() < 500);
+    }
 }

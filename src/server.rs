@@ -427,17 +427,23 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session: Arc<Session>, 
                     let mut state = lock_state(&session);
                     if let Some(buffer) = state.buffers.get_mut(&buffer_id) {
                         let old_alternate = buffer.parser.screen().alternate_screen();
+                        let old_history_len = buffer.parser.screen().scrollback_len();
+                        let had_search_matches = !buffer.vim.search_matches().is_empty();
                         let ris = buffer
                             .parser
                             .callbacks_mut()
                             .observe_ris(&output[..length]);
                         buffer.parser.process(&output[..length]);
+                        let history_len_changed =
+                            buffer.parser.screen().scrollback_len() != old_history_len;
                         let dropped_rows =
                             std::mem::take(&mut buffer.parser.callbacks_mut().dropped_primary_rows);
+                        let mut terminal_state_changed = ris;
                         {
                             let screen = buffer.parser.screen_mut();
                             let alternate_changed = screen.alternate_screen() != old_alternate;
                             let dropped_rows = if screen.alternate_screen() { 0 } else { dropped_rows };
+                            terminal_state_changed |= alternate_changed || dropped_rows > 0;
                             buffer.vim.history_changed(
                                 screen,
                                 if ris { None } else { Some(dropped_rows) },
@@ -454,8 +460,32 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session: Arc<Session>, 
                             payload.extend_from_slice(&buffer_id.to_be_bytes());
                             payload.extend_from_slice(&output[..length]);
                             broadcast(&mut state, Outgoing::BufferOutput(payload));
-                            send_vim_snapshot(&mut state, buffer_id);
-                            send_buffer_history_snapshots(&mut state, buffer_id);
+
+                            let history_offset =
+                                state.history_offsets.get(&buffer_id).copied().unwrap_or(0);
+                            let publish_metadata = state.buffers.get(&buffer_id).is_some_and(
+                                |buffer| {
+                                    should_publish_live_metadata(
+                                        buffer.vim.mode(),
+                                        buffer.app_control.is_enabled(),
+                                        app_control_changed,
+                                        terminal_state_changed,
+                                        history_len_changed,
+                                        had_search_matches,
+                                        !buffer.vim.search_matches().is_empty(),
+                                        buffer.vim.yank_flash().is_some(),
+                                        history_offset,
+                                    )
+                                },
+                            );
+                            if publish_metadata {
+                                send_vim_snapshot(&mut state, buffer_id);
+                                let updated_history_offset =
+                                    state.history_offsets.get(&buffer_id).copied().unwrap_or(0);
+                                if history_offset != 0 || updated_history_offset != 0 {
+                                    send_buffer_history_snapshots(&mut state, buffer_id);
+                                }
+                            }
                         } else if app_control_changed {
                             send_vim_snapshot(&mut state, buffer_id);
                         }
@@ -602,6 +632,27 @@ fn is_insert_passthrough(
         && effects
             .iter()
             .all(|effect| matches!(effect, crate::vim::Effect::Forward(_)))
+}
+fn should_publish_live_metadata(
+    mode: crate::vim::Mode,
+    app_control_enabled: bool,
+    app_control_changed: bool,
+    terminal_state_changed: bool,
+    history_len_changed: bool,
+    had_search_matches: bool,
+    has_search_matches: bool,
+    has_yank_flash: bool,
+    history_offset: usize,
+) -> bool {
+    app_control_changed
+        || app_control_enabled
+        || terminal_state_changed
+        || history_len_changed
+        || had_search_matches
+        || has_search_matches
+        || has_yank_flash
+        || history_offset != 0
+        || mode != crate::vim::Mode::Insert
 }
 
 fn flash_scrollback(flash: crate::vim::YankFlash, history_len: usize) -> usize {
@@ -881,6 +932,7 @@ fn attach_client(
                 snapshot_only: Arc::clone(&snapshot_only),
                 refresh_pending: Arc::clone(&refresh_pending),
                 pending_yanks: Vec::new(),
+
             },
         );
         resize_visible_buffers(&mut state);
@@ -1470,14 +1522,8 @@ fn output_loop(
             if let Outgoing::Yank(bytes) = message {
                 hold_yank(&mut lock_state(&session), id, bytes);
             }
-            if write_recovery_snapshot(
-                &mut stream,
-                &receiver,
-                &session,
-                id,
-                &refresh_pending,
-            )
-            .is_err()
+            if write_recovery_snapshot(&mut stream, &receiver, &session, id, &refresh_pending)
+                .is_err()
             {
                 break;
             }
@@ -1487,14 +1533,8 @@ fn output_loop(
             break;
         }
         if snapshot_only.load(Ordering::Acquire)
-            && write_recovery_snapshot(
-                &mut stream,
-                &receiver,
-                &session,
-                id,
-                &refresh_pending,
-            )
-            .is_err()
+            && write_recovery_snapshot(&mut stream, &receiver, &session, id, &refresh_pending)
+                .is_err()
         {
             break;
         }
@@ -1841,6 +1881,7 @@ pub(crate) fn read_frame(reader: &mut impl Read) -> io::Result<Option<(u8, Vec<u
 #[cfg(test)]
 mod history_tests {
     use super::*;
+
     #[test]
     fn insert_passthrough_does_not_publish_vim_state() {
         let forwarded = [crate::vim::Effect::Forward(b"ordinary input".to_vec())];
@@ -1873,6 +1914,49 @@ mod history_tests {
         let search = [crate::vim::Effect::SearchPrompt("query".into())];
         assert!(!is_insert_passthrough(true, false, &search));
         assert!(!is_insert_passthrough(false, false, &search));
+    }
+    #[test]
+    fn live_insert_output_skips_metadata_only_when_safe() {
+        use crate::vim::Mode;
+
+        let should_publish = |history_len_changed, had_search_matches, has_search_matches| {
+            should_publish_live_metadata(
+                Mode::Insert,
+                false,
+                false,
+                false,
+                history_len_changed,
+                had_search_matches,
+                has_search_matches,
+                false,
+                0,
+            )
+        };
+        assert!(!should_publish(false, false, false));
+        assert!(should_publish(true, false, false));
+        assert!(should_publish(false, false, true));
+        assert!(should_publish(false, true, false));
+        assert!(should_publish_live_metadata(
+            Mode::Normal, false, false, false, false, false, false, false, 0,
+        ));
+        assert!(should_publish_live_metadata(
+            Mode::Search, false, false, false, false, false, false, false, 0,
+        ));
+        assert!(should_publish_live_metadata(
+            Mode::Insert, false, true, false, false, false, false, false, 0,
+        ));
+        assert!(should_publish_live_metadata(
+            Mode::Insert, false, false, true, false, false, false, false, 0,
+        ));
+        assert!(should_publish_live_metadata(
+            Mode::Insert, true, false, false, false, false, false, false, 0,
+        ));
+        assert!(should_publish_live_metadata(
+            Mode::Insert, false, false, false, false, false, false, true, 0,
+        ));
+        assert!(should_publish_live_metadata(
+            Mode::Insert, false, false, false, false, false, false, false, 1,
+        ));
     }
 
 
