@@ -200,6 +200,28 @@ class VimModeSessions(unittest.TestCase):
         self.wait_for(received.exists, 'application did not receive Insert-mode input')
         self.assertEqual(received.read_bytes(), payload)
 
+    def test_insert_input_does_not_publish_redundant_snapshots(self):
+        ready = self.root / 'ready'
+        received = self.root / 'received'
+        script = ('import os,tty,time; tty.setraw(0); '
+                  f'open({str(ready)!r},"w").close(); '
+                  'data=os.read(0,1); '
+                  f'open({str(received)!r},"wb").write(data); time.sleep(30)')
+        _, terminal, _ = self.start_shell_session(command='python3 -u -c ' + shlex.quote(script))
+        self.wait_for(ready.exists)
+        observer = self.attach_control('vim', observe=False)
+        observer.settimeout(0.2)
+        try:
+            while True:
+                self.read_frame(observer)
+        except socket.timeout:
+            pass
+        os.write(terminal, b'x')
+        self.wait_for(lambda: received.exists() and received.stat().st_size == 1)
+        self.assertEqual(received.read_bytes(), b'x')
+        with self.assertRaises(socket.timeout):
+            self.read_frame(observer)
+
     def test_alt_escape_enters_normal_and_i_or_escape_returns_to_insert(self):
         _, terminal, _ = self.start_shell_session()
         self.wait_for(lambda: self.latest_state() is not None, 'missing initial Vim state')
@@ -580,6 +602,56 @@ class VimModeSessions(unittest.TestCase):
                       self.latest_state(buffer)['mode'] == 'normal' and
                       self.latest_state(buffer).get('matches'),
                       'replayed OMP transcript marker was not searchable')
+
+    def test_escape_clears_search_highlights(self):
+        _, terminal, _ = self.start_shell_session(
+            command="printf 'needle x needle\\033[H'; sleep 30")
+        self.wait_for(lambda: self.latest_state() is not None)
+        buffer = self.latest_state()['buffer']
+        self.send_keys(terminal, b'\x06needle\r')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'normal' and
+                      len(self.latest_state(buffer)['matches']) >= 2)
+        self.send_keys(terminal, b'\x1b')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'insert' and
+                      not self.latest_state(buffer)['matches'],
+                      'Escape did not clear accepted search highlighting')
+
+        self.send_keys(terminal, b'\x06needle')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'search' and
+                      self.latest_state(buffer)['matches'])
+        self.send_keys(terminal, b'\x1b')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'insert' and
+                      not self.latest_state(buffer)['matches'],
+                      'Escape did not clear search prompt highlighting')
+
+    def test_yank_flash_keeps_history_view_then_expires(self):
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        xclip = bin_dir / 'xclip'
+        xclip.write_text('#!/bin/sh\ncat >/dev/null\n')
+        xclip.chmod(0o755)
+        env = dict(self.env, PATH=f'{bin_dir}:{self.env.get("PATH", "")}')
+        _, terminal, _ = self.start_shell_session(command='seq 1 100; sleep 30', env=env)
+        self.wait_for(lambda: self.latest_state() and
+                      self.latest_state()['history_len'] >= 20)
+        buffer = self.latest_state()['buffer']
+        self.send_keys(terminal, b'\x1bd')
+        self.wait_for(lambda: self.latest_state(buffer)['scrollback'] == 5)
+        self.send_keys(terminal, b'vl')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'visual' and
+                      self.latest_state(buffer)['selection'] is not None)
+        selected = self.latest_state(buffer)['selection']
+        self.send_keys(terminal, b'y')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'insert' and
+                      self.latest_state(buffer).get('yank_selection') is not None,
+                      'missing yank flash')
+        state = self.latest_state(buffer)
+        self.assertEqual(state['yank_selection'], selected)
+        self.assertEqual(state['yank_mode'], 'visual')
+        self.assertEqual(state['scrollback'], 5)
+        self.wait_for(lambda: self.latest_state(buffer).get('yank_selection') is None and
+                      self.latest_state(buffer)['scrollback'] == 0,
+                      'yank flash did not expire and return to live output')
 
     def test_configurable_n_and_N_search_bindings(self):
         config = self.root / 'config' / 'rmux' / 'config.toml'

@@ -24,6 +24,10 @@ struct VimView {
     cursor_col: u16,
     selection: Option<(usize, u16, usize, u16)>,
     #[serde(default)]
+    yank_selection: Option<(usize, u16, usize, u16)>,
+    #[serde(default)]
+    yank_mode: Option<String>,
+    #[serde(default)]
     selection_mode: Option<String>,
     matches: Vec<Vec<(usize, u16)>>,
     active_match: Option<usize>,
@@ -188,14 +192,18 @@ impl Renderer {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return Ok(());
         };
-        let bracketed_paste = self.prompt.is_none()
-            && snapshot.active_buffer.is_some_and(|buffer| {
-                !self.history_parsers.contains_key(&buffer)
-                    && self
-                        .parsers
-                        .get(&buffer)
-                        .is_some_and(|parser| parser.screen().bracketed_paste())
-            });
+        let bracketed_paste = snapshot.active_buffer.is_some_and(|buffer| {
+            let showing_flash = self.vim.get(&buffer)
+                .is_some_and(|view| view.yank_selection.is_some());
+            let live_setting = self.parsers.get(&buffer)
+                .is_some_and(|parser| parser.screen().bracketed_paste());
+            bracketed_paste_enabled(
+                self.prompt.is_some(),
+                self.history_parsers.contains_key(&buffer),
+                showing_flash,
+                live_setting,
+            )
+        });
         if self.bracketed_paste != Some(bracketed_paste) {
             if bracketed_paste {
                 queue!(output, crossterm::event::EnableBracketedPaste)?;
@@ -542,13 +550,13 @@ fn draw_pane(
             if let Some(view) = vim {
                 let absolute_row = absolute_top + usize::from(row);
                 let selected = selection_contains(view, absolute_row, col);
+                let yanked = yank_selection_contains(view, absolute_row, col);
                 let matched = match_contains(view, absolute_row, col);
                 let active_match = view
                     .active_match
                     .and_then(|index| view.matches.get(index))
                     .is_some_and(|positions| positions.contains(&(absolute_row, col)));
-                style.inverse |= selected || active_match;
-                style.underline |= matched && !selected && !active_match;
+                apply_match_style(&mut style, selected, yanked, matched, active_match);
             }
             apply_cell_style(output, previous_style, style)?;
             previous_style = Some(style);
@@ -563,6 +571,15 @@ fn draw_pane(
         }
     }
     queue!(output, SetAttribute(Attribute::Reset))
+}
+
+fn bracketed_paste_enabled(
+    prompt_active: bool,
+    showing_history: bool,
+    showing_yank_flash: bool,
+    live_setting: bool,
+) -> bool {
+    !prompt_active && (!showing_history || showing_yank_flash) && live_setting
 }
 
 fn selection_contains(view: &VimView, row: usize, col: u16) -> bool {
@@ -583,11 +600,49 @@ fn selection_contains(view: &VimView, row: usize, col: u16) -> bool {
     }
 }
 
+fn yank_selection_contains(view: &VimView, row: usize, col: u16) -> bool {
+    let Some((start_row, start_col, end_row, end_col)) = view.yank_selection else {
+        return false;
+    };
+    if row < start_row || row > end_row {
+        return false;
+    }
+    match view.yank_mode.as_deref() {
+        Some("visual-line") => true,
+        Some("visual-block") => (start_col.min(end_col)..=start_col.max(end_col)).contains(&col),
+        Some("visual") => {
+            (row > start_row || col >= start_col)
+                && (row < end_row || col <= end_col)
+        }
+        _ => false,
+    }
+}
+
 fn match_contains(view: &VimView, row: usize, col: u16) -> bool {
     view.matches
         .iter()
         .flatten()
         .any(|&(match_row, match_col)| match_row == row && match_col == col)
+}
+
+fn apply_match_style(style: &mut CellStyle, selected: bool, yanked: bool, matched: bool, active_match: bool) {
+    if yanked {
+        style.foreground = Color::Black;
+        style.background = Color::Rgb { r: 255, g: 165, b: 0 };
+        style.inverse = false;
+    } else if selected {
+        style.foreground = Color::White;
+        style.background = Color::Rgb { r: 35, g: 90, b: 190 };
+        style.inverse = false;
+    } else if active_match {
+        style.foreground = Color::Black;
+        style.background = Color::Rgb { r: 255, g: 165, b: 0 };
+        style.inverse = false;
+    } else if matched {
+        style.foreground = Color::White;
+        style.background = Color::Rgb { r: 35, g: 90, b: 190 };
+        style.inverse = false;
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1519,6 +1574,8 @@ mod tests {
             cursor_row: 8,
             cursor_col: 4,
             selection: Some((4, 2, 8, 4)),
+            yank_selection: None,
+            yank_mode: None,
             selection_mode: None,
             matches: Vec::new(),
             active_match: None,
@@ -1553,4 +1610,65 @@ mod tests {
         assert!(!selection_contains(&view, 7, 1));
         assert!(!selection_contains(&view, 7, 1));
     }
+
+    #[test]
+    fn yank_flash_selection_uses_original_visual_shape() {
+        let view = VimView {
+            buffer: 1,
+            mode: "insert".into(),
+            cursor_row: 0,
+            cursor_col: 0,
+            selection: None,
+            yank_selection: Some((4, 2, 6, 4)),
+            yank_mode: Some("visual-block".into()),
+            selection_mode: None,
+            matches: Vec::new(),
+            active_match: None,
+            prompt: None,
+            app_control: false,
+            history_len: 8,
+            scrollback: 4,
+        };
+        assert!(yank_selection_contains(&view, 5, 3));
+        assert!(!yank_selection_contains(&view, 5, 1));
+        assert!(!yank_selection_contains(&view, 7, 3));
+    }
+
+    #[test]
+    fn search_and_visual_highlights_use_contrasting_colors_and_selection_wins() {
+        let mut style = CellStyle {
+            foreground: Color::White,
+            background: Color::Black,
+            bold: false,
+            dim: false,
+            italic: false,
+            underline: false,
+            inverse: true,
+        };
+
+        apply_match_style(&mut style, false, false, true, false);
+        assert_eq!(style.foreground, Color::White);
+        assert_eq!(style.background, Color::Rgb { r: 35, g: 90, b: 190 });
+        assert!(!style.inverse);
+
+        apply_match_style(&mut style, false, false, true, true);
+        assert_eq!(style.foreground, Color::Black);
+        assert_eq!(style.background, Color::Rgb { r: 255, g: 165, b: 0 });
+
+        apply_match_style(&mut style, true, false, true, true);
+        assert_eq!(style.foreground, Color::White);
+        assert_eq!(style.background, Color::Rgb { r: 35, g: 90, b: 190 });
+        assert!(!style.inverse);
+        apply_match_style(&mut style, true, true, true, true);
+        assert_eq!(style.foreground, Color::Black);
+        assert_eq!(style.background, Color::Rgb { r: 255, g: 165, b: 0 });
+    }
+    #[test]
+    fn yank_flash_history_view_keeps_live_bracketed_paste_enabled() {
+        assert!(bracketed_paste_enabled(false, true, true, true));
+        assert!(!bracketed_paste_enabled(false, true, false, true));
+        assert!(!bracketed_paste_enabled(true, true, true, true));
+        assert!(!bracketed_paste_enabled(false, true, true, false));
+    }
+
 }

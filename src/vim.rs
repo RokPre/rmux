@@ -16,6 +16,9 @@ pub struct Position {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct YankFlash { pub range: CellRange, pub kind: VisualKind, pub viewport_top: usize }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellRange { pub start: Position, pub end: Position }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,8 +49,6 @@ pub struct Vim {
     search_direction: Direction,
     matches: Vec<Vec<Position>>,
     active_match: Option<usize>,
-    saved_matches: Vec<Vec<Position>>,
-    saved_active_match: Option<usize>,
     prompt: String,
     prompt_direction: Direction,
     return_mode: Mode,
@@ -58,6 +59,7 @@ pub struct Vim {
     bracketed_paste: bool,
     search_utf8: Vec<u8>,
     last_yank: Option<String>,
+    yank_flash: Option<YankFlash>,
 }
 
 impl Default for Vim { fn default() -> Self { Self::new() } }
@@ -74,8 +76,6 @@ impl Vim {
             search_direction: Direction::Forward,
             matches: Vec::new(),
             active_match: None,
-            saved_matches: Vec::new(),
-            saved_active_match: None,
             prompt: String::new(),
             prompt_direction: Direction::Forward,
             return_mode: Mode::Normal,
@@ -84,6 +84,7 @@ impl Vim {
             insert_pending: Vec::new(),
             bracketed_paste: false,
             search_origin: None,
+            yank_flash: None,
             search_utf8: Vec::new(),
             last_yank: None,
         }
@@ -93,6 +94,8 @@ impl Vim {
     pub fn search_text(&self) -> &str { &self.search }
     pub fn search_matches(&self) -> &[Vec<Position>] { &self.matches }
     pub fn prompt_text(&self) -> &str { &self.prompt }
+    pub fn yank_flash(&self) -> Option<YankFlash> { self.yank_flash }
+    pub fn clear_yank_flash(&mut self) { self.yank_flash = None; }
     pub fn selection_mode(&self) -> Option<&'static str> {
         let mode = if self.mode == Mode::Search { self.return_mode } else { self.mode };
         match mode {
@@ -376,8 +379,8 @@ impl Vim {
             Key::Ctrl('d') => { let count = std::mem::take(&mut self.count).max(1); let page = (screen.size().0.get() as usize / 2).max(1).saturating_mul(count).min(i32::MAX as usize) as i32; self.scroll(screen, -page); Vec::new() }
             Key::Ctrl('u') => { let count = std::mem::take(&mut self.count).max(1); let page = (screen.size().0.get() as usize / 2).max(1).saturating_mul(count).min(i32::MAX as usize) as i32; self.scroll(screen, page); Vec::new() }
             Key::Ctrl('b') => { let count = std::mem::take(&mut self.count).max(1); self.scroll(screen, (screen.size().0.get() as usize).saturating_mul(count).min(i32::MAX as usize) as i32); Vec::new() }
-            Key::Escape if matches!(self.mode, Mode::Visual(_)) => { self.mode = Mode::Normal; self.anchor = None; self.count = 0; self.pending_count = 0; self.pending.clear(); Vec::new() }
-            Key::Escape => { screen.set_scrollback(0); self.mode = Mode::Insert; self.anchor = None; self.count = 0; self.pending_count = 0; self.pending.clear(); Vec::new() }
+            Key::Escape if matches!(self.mode, Mode::Visual(_)) => { self.clear_search(); self.mode = Mode::Normal; self.anchor = None; self.count = 0; self.pending_count = 0; self.pending.clear(); Vec::new() }
+            Key::Escape => { self.clear_search(); screen.set_scrollback(0); self.mode = Mode::Insert; self.anchor = None; self.count = 0; self.pending_count = 0; self.pending.clear(); Vec::new() }
             Key::Char('i') if self.mode == Mode::Normal && self.pending.is_empty() => { screen.set_scrollback(0); self.mode = Mode::Insert; Vec::new() }
             Key::Char('v') => self.enter_visual(VisualKind::Character),
             Key::Char('V') => self.enter_visual(VisualKind::Line),
@@ -598,30 +601,27 @@ impl Vim {
         self.return_mode = from;
         self.search_origin = self.cursor;
         self.prompt_direction = direction;
-        self.saved_matches.clone_from(&self.matches);
-        self.saved_active_match = self.active_match;
         self.prompt.clear();
         self.mode = Mode::Search;
         vec![Effect::SearchPrompt(String::new())]
     }
 
+    fn clear_search(&mut self) {
+        self.search.clear();
+        self.prompt.clear();
+        self.matches.clear();
+        self.active_match = None;
+    }
+
     fn handle_search_key(&mut self, screen: &mut Screen, key: Key) -> Vec<Effect> {
         match key {
             Key::Escape => {
-                let saved_active = self.saved_active_match
-                    .and_then(|index| self.saved_matches.get(index))
-                    .and_then(|positions| positions.first())
-                    .copied();
                 self.mode = self.return_mode;
-                self.rebuild_matches(screen);
-                self.active_match = saved_active.and_then(|position| {
-                    self.matches.iter().position(|positions| positions.first() == Some(&position))
-                });
                 if let Some(origin) = self.search_origin.take() { self.set_cursor(screen, origin); }
                 if self.mode == Mode::Insert {
                     screen.set_scrollback(0);
                 }
-                self.prompt.clear();
+                self.clear_search();
                 self.search_utf8.clear();
                 vec![Effect::SearchClosed]
             }
@@ -709,6 +709,11 @@ impl Vim {
         let kind = match self.mode { Mode::Visual(kind) => kind, _ => return None };
         let start = anchor.min(cursor);
         let end = anchor.max(cursor);
+        self.yank_flash = Some(YankFlash {
+            range: CellRange { start, end },
+            kind,
+            viewport_top: top_visible_row(screen),
+        });
         let cols = screen.size().1.get();
         let mut text = String::new();
         match kind {
@@ -739,20 +744,27 @@ impl Vim {
             self.search_origin = None;
             self.matches.clear();
             self.active_match = None;
-            self.saved_matches.clear();
-            self.saved_active_match = None;
+            self.yank_flash = None;
         } else if let Some(dropped_rows) = dropped_rows.filter(|rows| *rows > 0) {
             let rebase = |p: Position| Some(Position { row: p.row.checked_sub(dropped_rows)?, col: p.col });
+            if let Some(mut flash) = self.yank_flash {
+                self.yank_flash = match (rebase(flash.range.start), rebase(flash.range.end)) {
+                    (Some(start), Some(end)) => {
+                        flash.range = CellRange { start, end };
+                        flash.viewport_top = flash.viewport_top.saturating_sub(dropped_rows);
+                        Some(flash)
+                    }
+                    _ => None,
+                };
+            }
             self.cursor = self.cursor.and_then(rebase);
             self.anchor = self.anchor.and_then(rebase);
             self.search_origin = self.search_origin.and_then(rebase);
             self.matches.retain(|positions| positions.iter().all(|p| p.row >= dropped_rows));
-            self.saved_matches.retain(|positions| positions.iter().all(|p| p.row >= dropped_rows));
-            for positions in self.matches.iter_mut().chain(&mut self.saved_matches) {
+            for positions in &mut self.matches {
                 for position in positions { *position = rebase(*position).unwrap(); }
             }
             self.active_match = None;
-            self.saved_active_match = None;
         }
         if matches!(self.mode, Mode::Visual(_)) && self.anchor.is_none() {
             self.mode = Mode::Normal;
@@ -763,6 +775,7 @@ impl Vim {
     }
 
     pub fn resized(&mut self, screen: &mut Screen) {
+        self.yank_flash = None;
         self.clamp_anchor(screen);
         self.clamp_cursor(screen);
         self.search_origin = self.search_origin.map(|mut p| {
@@ -1124,6 +1137,65 @@ mod tests {
     }
 
     #[test]
+    fn visual_yank_keeps_exact_range_flash_and_returns_to_insert() {
+        let mut screen = test_screen();
+        let mut vim = Vim::new();
+        vim.handle_key(&mut screen, Key::AltEscape);
+        vim.handle_key(&mut screen, Key::Char('v'));
+        vim.handle_key(&mut screen, Key::Char('l'));
+        assert_eq!(vim.handle_key(&mut screen, Key::Char('y')), vec![Effect::Yank("on".into())]);
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert_eq!(vim.yank_flash(), Some(YankFlash {
+            range: CellRange { start: Position { row: 0, col: 0 }, end: Position { row: 0, col: 1 } },
+            kind: VisualKind::Character,
+            viewport_top: 0,
+        }));
+    }
+
+    #[test]
+    fn visual_yank_flash_pins_scrollback_view() {
+        let mut parser = vt100::Parser::new(NonZeroU16::new(3).unwrap(), NonZeroU16::new(8).unwrap(), 20);
+        parser.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let mut screen = parser.screen().clone();
+        screen.set_scrollback(2);
+        let mut vim = Vim::new();
+        vim.mode = Mode::Visual(VisualKind::Line);
+        vim.anchor = Some(Position { row: 2, col: 1 });
+        vim.cursor = Some(Position { row: 2, col: 4 });
+        vim.handle_key(&mut screen, Key::Char('y'));
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert_eq!(vim.yank_flash(), Some(YankFlash {
+            range: CellRange { start: Position { row: 2, col: 1 }, end: Position { row: 2, col: 4 } },
+            kind: VisualKind::Line,
+            viewport_top: 0,
+        }));
+        assert_eq!(screen.scrollback(), 0);
+    }
+
+    #[test]
+    fn history_eviction_rebases_yank_range_and_absolute_viewport() {
+        let mut screen = test_screen();
+        let mut vim = Vim::new();
+        vim.yank_flash = Some(YankFlash {
+            range: CellRange {
+                start: Position { row: 6, col: 1 },
+                end: Position { row: 7, col: 3 },
+            },
+            kind: VisualKind::Character,
+            viewport_top: 4,
+        });
+        vim.history_changed(&mut screen, Some(2), false);
+        assert_eq!(vim.yank_flash(), Some(YankFlash {
+            range: CellRange {
+                start: Position { row: 4, col: 1 },
+                end: Position { row: 5, col: 3 },
+            },
+            kind: VisualKind::Character,
+            viewport_top: 2,
+        }));
+    }
+
+    #[test]
     fn search_confirmation_and_cancellation_redispatch_remaining_bytes() {
         let mut screen = test_screen();
         let mut vim = Vim::new();
@@ -1236,6 +1308,8 @@ mod tests {
         );
         assert_eq!(vim.mode(), Mode::Insert);
         assert_eq!(screen.scrollback(), 0);
+        assert!(vim.search_text().is_empty());
+        assert!(vim.search_matches().is_empty());
     }
 
 
@@ -1312,6 +1386,44 @@ mod tests {
         for c in "abc".chars() { vim.handle_key(&mut screen, Key::Char(c)); }
         assert!(vim.search_matches().iter().any(|m| m.first() == Some(&Position { row: 1, col: 0 })));
         vim.handle_key(&mut screen, Key::Enter); assert_eq!(vim.mode(), Mode::Normal);
+    }
+    #[test]
+    fn escape_after_accepted_search_clears_highlights_and_enters_insert() {
+        let mut screen = test_screen();
+        let mut vim = Vim::new();
+        normal(&mut vim, &mut screen);
+        vim.handle_key(&mut screen, Key::Ctrl('f'));
+        for c in "one".chars() { vim.handle_key(&mut screen, Key::Char(c)); }
+        vim.handle_key(&mut screen, Key::Enter);
+        assert_eq!(vim.search_text(), "one");
+        assert!(!vim.search_matches().is_empty());
+
+        assert!(vim.handle_key(&mut screen, Key::Escape).is_empty());
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert!(vim.search_text().is_empty());
+        assert!(vim.search_matches().is_empty());
+    }
+
+    #[test]
+    fn prompt_escape_clears_previous_query_and_highlights() {
+        let mut screen = test_screen();
+        let mut vim = Vim::new();
+        normal(&mut vim, &mut screen);
+        vim.handle_key(&mut screen, Key::Ctrl('f'));
+        for c in "one".chars() { vim.handle_key(&mut screen, Key::Char(c)); }
+        vim.handle_key(&mut screen, Key::Enter);
+        assert!(!vim.search_matches().is_empty());
+
+        vim.handle_key(&mut screen, Key::Ctrl('f'));
+        for c in "ABC".chars() { vim.handle_key(&mut screen, Key::Char(c)); }
+        assert_eq!(vim.prompt_text(), "ABC");
+        assert!(!vim.search_matches().is_empty());
+        assert_eq!(vim.handle_key(&mut screen, Key::Escape), vec![Effect::SearchClosed]);
+
+        assert_eq!(vim.mode(), Mode::Normal);
+        assert!(vim.search_text().is_empty());
+        assert!(vim.prompt_text().is_empty());
+        assert!(vim.search_matches().is_empty());
     }
     #[test]
     fn visual_yank_returns_client_clipboard_text() {
@@ -1529,6 +1641,8 @@ mod tests {
         assert_eq!(vim.mode(), Mode::Visual(VisualKind::Character));
         assert_eq!(vim.cursor(&mut screen), Position { row: 0, col: 1 });
         assert_eq!(vim.selection(&mut screen), Some(CellRange { start: anchor, end: Position { row: 0, col: 1 } }));
+        assert!(vim.search_text().is_empty());
+        assert!(vim.search_matches().is_empty());
 
         vim.handle_key(&mut screen, Key::Ctrl('f'));
         for c in "three".chars() { vim.handle_key(&mut screen, Key::Char(c)); }

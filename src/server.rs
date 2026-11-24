@@ -48,6 +48,7 @@ pub(crate) const YANK: u8 = 8;
 pub(crate) const VIM_KEY: u8 = 20;
 const MAX_FRAME: usize = 1024 * 1024;
 const SCROLLBACK_LIMIT: usize = 2000;
+const YANK_FLASH_DURATION: Duration = Duration::from_millis(400);
 
 pub(crate) enum Outgoing {
     BufferSnapshot(Vec<u8>),
@@ -79,6 +80,7 @@ struct Buffer {
     session_id: Option<libc::pid_t>,
     child_identity: Option<crate::vim_control::ProcessIdentity>,
     vim: crate::vim::Vim,
+    yank_flash_deadline: Option<Instant>,
     app_control: crate::vim_control::AppControl,
 }
 
@@ -197,6 +199,8 @@ struct VimSnapshot {
     cursor_row: usize,
     cursor_col: u16,
     selection: Option<(usize, u16, usize, u16)>,
+    yank_selection: Option<(usize, u16, usize, u16)>,
+    yank_mode: Option<String>,
     matches: Vec<Vec<(usize, u16)>>,
     active_match: Option<usize>,
     prompt: Option<String>,
@@ -273,6 +277,7 @@ pub(crate) fn run_server(args: &[std::ffi::OsString]) -> io::Result<()> {
 
     let mut last_app_prune = Instant::now();
     loop {
+        expire_yank_flashes(&session);
         if session.shutdown.load(Ordering::Acquire) || reap_exited_buffers(&session)? {
             break;
         }
@@ -405,6 +410,7 @@ fn spawn_buffer(
             session_id,
             child_identity,
             vim: crate::vim::Vim::new(),
+            yank_flash_deadline: None,
             app_control: crate::vim_control::AppControl::default(),
         },
         reader,
@@ -586,30 +592,58 @@ fn buffer_process_owns(buffer: &Buffer, identity: crate::vim_control::ProcessIde
     )
 }
 
+fn is_insert_passthrough(
+    was_insert: bool,
+    is_insert: bool,
+    effects: &[crate::vim::Effect],
+) -> bool {
+    was_insert
+        && is_insert
+        && effects
+            .iter()
+            .all(|effect| matches!(effect, crate::vim::Effect::Forward(_)))
+}
+
+fn flash_scrollback(flash: crate::vim::YankFlash, history_len: usize) -> usize {
+    history_len.saturating_sub(flash.viewport_top)
+}
 fn send_vim_snapshot(state: &mut SessionState, id: u64) {
     let Some(buffer) = state.buffers.get_mut(&id) else {
         return;
     };
     let payload = vim_snapshot_payload(buffer, id);
-    state.history_offsets.insert(id, buffer.parser.screen().scrollback());
+    let scrollback = buffer.vim.yank_flash().map_or_else(
+        || buffer.parser.screen().scrollback(),
+        |flash| flash_scrollback(flash, buffer.parser.screen().scrollback_len()),
+    );
+    state.history_offsets.insert(id, scrollback);
     if let Some(payload) = payload {
         broadcast(state, Outgoing::VimState(payload));
     }
 }
 
 fn vim_snapshot_payload(buffer: &mut Buffer, id: u64) -> Option<Vec<u8>> {
+    let flash = buffer.vim.yank_flash();
     let screen = buffer.parser.screen_mut();
     let cursor = buffer.vim.cursor(screen);
     let selection = buffer.vim.selection(screen).map(|range| {
         (range.start.row, range.start.col, range.end.row, range.end.col)
     });
-    let scrollback = screen.scrollback();
     let history_len = screen.scrollback_len();
+    let scrollback = flash.map_or(screen.scrollback(), |flash| flash_scrollback(flash, history_len));
     let (rows, _) = screen.size();
     let top = history_len.saturating_sub(scrollback);
     let bottom = top + usize::from(rows.get()) - 1;
     let matches = visible_matches(&buffer.vim, top, bottom);
     let mode = vim_mode_name(buffer.vim.mode());
+    let yank_selection = flash.map(|flash| (
+        flash.range.start.row, flash.range.start.col, flash.range.end.row, flash.range.end.col,
+    ));
+    let yank_mode = flash.map(|flash| match flash.kind {
+        crate::vim::VisualKind::Character => "visual",
+        crate::vim::VisualKind::Line => "visual-line",
+        crate::vim::VisualKind::Block => "visual-block",
+    }.to_owned());
     serde_json::to_vec(&VimSnapshot {
         buffer: id,
         mode: mode.to_owned(),
@@ -617,6 +651,8 @@ fn vim_snapshot_payload(buffer: &mut Buffer, id: u64) -> Option<Vec<u8>> {
         cursor_row: cursor.row,
         cursor_col: cursor.col,
         selection,
+        yank_selection,
+        yank_mode,
         active_match: matches.iter().position(|positions| positions.first() == Some(&(cursor.row, cursor.col))),
         matches,
         prompt: (mode == "search").then(|| buffer.vim.prompt_text().to_owned()),
@@ -651,6 +687,22 @@ fn visible_matches(vim: &crate::vim::Vim, top: usize, bottom: usize) -> Vec<Vec<
         positions += matched.len();
         Some(matched.iter().map(|p| (p.row, p.col)).collect())
     }).collect()
+}
+
+fn expire_yank_flashes(session: &Session) {
+    let now = Instant::now();
+    let mut state = lock_state(session);
+    let expired: Vec<_> = state.buffers.iter_mut().filter_map(|(&id, buffer)| {
+        (buffer.yank_flash_deadline.is_some_and(|deadline| deadline <= now)).then(|| {
+            buffer.yank_flash_deadline = None;
+            buffer.vim.clear_yank_flash();
+            id
+        })
+    }).collect();
+    for id in expired {
+        send_vim_snapshot(&mut state, id);
+        send_buffer_history_snapshots(&mut state, id);
+    }
 }
 fn hold_yank(state: &mut SessionState, client_id: u64, bytes: Vec<u8>) {
     if let Some(client) = state.clients.get_mut(&client_id) {
@@ -862,16 +914,28 @@ fn attach_client(
                 if let Some(active) = active_buffer(&state) {
                     let mut forwarded = Vec::new();
                     let mut yanks = Vec::new();
+                    let mut publish_vim_state = true;
                     if let Some(buffer) = state.buffers.get_mut(&active) {
+                        let had_yank_flash = buffer.vim.yank_flash().is_some();
+                        buffer.vim.clear_yank_flash();
+                        buffer.yank_flash_deadline = None;
                         if buffer.app_control.is_enabled() {
                             if kind == INPUT {
                                 forwarded.extend_from_slice(&payload);
                             }
                         } else {
-                            for effect in buffer
+                            let was_insert = buffer.vim.mode() == crate::vim::Mode::Insert;
+                            let effects = buffer
                                 .vim
-                                .handle_bytes(buffer.parser.screen_mut(), &payload)
-                            {
+                                .handle_bytes(buffer.parser.screen_mut(), &payload);
+                            buffer.yank_flash_deadline = buffer.vim.yank_flash()
+                                .map(|_| Instant::now() + YANK_FLASH_DURATION);
+                            publish_vim_state = had_yank_flash || !is_insert_passthrough(
+                                was_insert,
+                                buffer.vim.mode() == crate::vim::Mode::Insert,
+                                &effects,
+                            );
+                            for effect in effects {
                                 match effect {
                                     crate::vim::Effect::Forward(bytes) => forwarded.extend(bytes),
                                     crate::vim::Effect::Yank(text) => yanks.push(text.into_bytes()),
@@ -890,8 +954,10 @@ fn attach_client(
                     for bytes in yanks {
                         enqueue_yank(&mut state, id, bytes);
                     }
-                    send_vim_snapshot(&mut state, active);
-                    send_buffer_history_snapshots(&mut state, active);
+                    if publish_vim_state {
+                        send_vim_snapshot(&mut state, active);
+                        send_buffer_history_snapshots(&mut state, active);
+                    }
                 }
             }
             VIM_FLUSH if payload.is_empty() => {
@@ -907,6 +973,10 @@ fn attach_client(
                     client.cols = u16::from_be_bytes([payload[2], payload[3]]).max(1);
                     crate::debug_log(format_args!("client resize client={id} size={}x{}", client.cols, client.rows));
                 }
+                for buffer in state.buffers.values_mut() {
+                    buffer.vim.clear_yank_flash();
+                    buffer.yank_flash_deadline = None;
+                }
                 resize_visible_buffers(&mut state);
                 send_visible_buffer_snapshots(&mut state);
             }
@@ -917,6 +987,12 @@ fn attach_client(
                 if !state.clients.contains_key(&id) {
                     continue;
                 }
+                if let Some(buffer) = state.buffers.get_mut(&buffer) {
+                    buffer.vim.clear_yank_flash();
+                    buffer.yank_flash_deadline = None;
+                }
+                state.history_offsets.insert(buffer, offset);
+                send_vim_snapshot(&mut state, buffer);
                 state.history_offsets.insert(buffer, offset);
                 send_buffer_history_snapshots(&mut state, buffer);
             }
@@ -1765,6 +1841,40 @@ pub(crate) fn read_frame(reader: &mut impl Read) -> io::Result<Option<(u8, Vec<u
 #[cfg(test)]
 mod history_tests {
     use super::*;
+    #[test]
+    fn insert_passthrough_does_not_publish_vim_state() {
+        let forwarded = [crate::vim::Effect::Forward(b"ordinary input".to_vec())];
+        assert!(is_insert_passthrough(true, true, &forwarded));
+        assert!(is_insert_passthrough(true, true, &[]));
+        assert!(!is_insert_passthrough(false, false, &forwarded));
+        assert!(!is_insert_passthrough(true, false, &forwarded));
+    }
+
+    #[test]
+    fn yank_flash_scrollback_tracks_history_growth_and_eviction() {
+        let mut flash = crate::vim::YankFlash {
+            range: crate::vim::CellRange {
+                start: crate::vim::Position { row: 6, col: 0 },
+                end: crate::vim::Position { row: 6, col: 2 },
+            },
+            kind: crate::vim::VisualKind::Character,
+            viewport_top: 4,
+        };
+        assert_eq!(flash_scrollback(flash, 10), 6);
+        assert_eq!(flash_scrollback(flash, 13), 9);
+        flash.viewport_top = flash.viewport_top.saturating_sub(2);
+        flash.range.start.row -= 2;
+        flash.range.end.row -= 2;
+        assert_eq!(flash_scrollback(flash, 11), 9);
+    }
+
+    #[test]
+    fn insert_mode_transitions_and_search_updates_publish_vim_state() {
+        let search = [crate::vim::Effect::SearchPrompt("query".into())];
+        assert!(!is_insert_passthrough(true, false, &search));
+        assert!(!is_insert_passthrough(false, false, &search));
+    }
+
 
     #[test]
     fn server_scrollback_is_bounded_and_csi_three_j_clears_it() {
