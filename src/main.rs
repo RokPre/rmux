@@ -61,6 +61,8 @@ pub(crate) struct Response {
     pub start_time: u64,
     #[serde(default)]
     pub supports_resize_step: bool,
+    #[serde(default)]
+    pub supports_vim_protocol: bool,
 }
 
 fn main() {
@@ -302,8 +304,9 @@ mod tests {
         }
     }
     #[test]
-    fn older_server_responses_default_to_no_resize_step_support() {
+    fn older_server_responses_default_to_no_optional_capabilities() {
         let response: Response = serde_json::from_str(r#"{"ok":true,"name":"old"}"#).unwrap();
         assert!(!response.supports_resize_step);
+        assert!(!response.supports_vim_protocol);
     }
 }

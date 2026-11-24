@@ -109,7 +109,7 @@ All configurable Vim actions and their default keys are:
 | `vim_yank`, `vim_insert`, `vim_normal` | `y`, `i`, `Escape` |
 | `vim_scroll_insert_down`, `vim_scroll_insert_up` | `Alt-d`, `Alt-f` |
 
-`vim_match_next` / `vim_match_previous` are alternate action names for `vim_next_match` / `vim_previous_match`. Vim action bindings are context-sensitive. A configured binding replaces the corresponding default in its applicable modes; other actions retain their defaults.
+`vim_match_next` / `vim_match_previous` are alternate action names for `vim_next_match` / `vim_previous_match`. Vim action bindings are context-sensitive. A configured binding replaces the corresponding default in its applicable modes; other actions retain their defaults. `vim_normal` is an exception: its configured key is added while `Alt-Escape` and `Escape` remain available.
 
 For a Neovim buffer to temporarily pass its own keys through to Neovim instead of treating Vim-mode keys as rmux commands, install the provided `contrib/rmux.nvim.lua` as `~/.config/nvim/lua/rmux.lua` (or another module on `runtimepath`) and load it from `init.lua`:
 

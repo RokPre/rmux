@@ -433,8 +433,14 @@ impl Vim {
     fn command(&mut self, screen: &mut Screen, key: char, count: usize) {
         let Some(mut p) = self.cursor else { return; };
         match key {
-            'h' => for _ in 0..count { step_horizontal(screen, &mut p, false); },
-            'l' => for _ in 0..count { step_horizontal(screen, &mut p, true); },
+            'h' | 'l' => {
+                let forward = key == 'l';
+                for _ in 0..count.min(usize::from(screen.size().1.get() - 1)) {
+                    let previous = p;
+                    step_horizontal(screen, &mut p, forward);
+                    if p == previous { break; }
+                }
+            }
             'j' => p.row = p.row.saturating_add(count),
             'k' => p.row = p.row.saturating_sub(count),
             '0' => p.col = 0,
@@ -500,8 +506,14 @@ impl Vim {
             'E' => end = word_end_kind(screen, start, count, true),
             'b' => end = word_motion_kind(screen, start, count, false, false),
             'B' => end = word_motion_kind(screen, start, count, false, true),
-            'h' => for _ in 0..count { step_horizontal(screen, &mut end, false); },
-            'l' => for _ in 0..count { step_horizontal(screen, &mut end, true); },
+            'h' | 'l' => {
+                let forward = motion == 'l';
+                for _ in 0..count.min(usize::from(screen.size().1.get() - 1)) {
+                    let previous = end;
+                    step_horizontal(screen, &mut end, forward);
+                    if end == previous { break; }
+                }
+            }
             '$' => end.col = last_column(screen, start),
             '0' => end.col = 0,
             'j' => end.row = end.row.saturating_add(count).min(last_row(screen)),
@@ -512,9 +524,11 @@ impl Vim {
         let mut text = String::new();
         for row in a.row..=b.row {
             if row != a.row { text.push('\n'); }
+            if exclusive && row == b.row && b.col == 0 { continue; }
             let first = if row == a.row { a.col } else { 0 };
-            let mut last = if row == b.row { b.col } else { screen.size().1.get() - 1 };
-            if exclusive && row == b.row { last = last.saturating_sub(1); }
+            let last = if row == b.row {
+                if exclusive { b.col.saturating_sub(1) } else { b.col }
+            } else { screen.size().1.get() - 1 };
             if first <= last { text.push_str(&row_text(screen, row, first, last)); }
         }
         self.last_yank = Some(text);
@@ -553,6 +567,7 @@ impl Vim {
                     end = next;
                 }
                 for _ in 1..count {
+                    if end.row == last_row(screen) && end.col + 1 == screen.size().1.get() { break; }
                     let mut next = end;
                     while next.row < last_row(screen) || next.col + 1 < screen.size().1.get() {
                         advance(&mut next, screen);
@@ -1022,6 +1037,7 @@ fn motion_class(screen: &mut Screen, p: Position, big: bool) -> u8 {
 }
 fn word_motion_kind(screen: &mut Screen, mut p: Position, count: usize, forward: bool, big: bool) -> Position {
     for _ in 0..count {
+        let previous = p;
         if forward {
             let class = motion_class(screen, p, big);
             if class != 0 {
@@ -1035,7 +1051,7 @@ fn word_motion_kind(screen: &mut Screen, mut p: Position, count: usize, forward:
             }
             while (p.row < last_row(screen) || p.col + 1 < screen.size().1.get()) && motion_class(screen, p, big) == 0 { advance(&mut p, screen); }
         } else {
-            if p.row == 0 && p.col == 0 { continue; }
+            if p.row == 0 && p.col == 0 { return p; }
             retreat(&mut p, screen);
             while (p.row > 0 || p.col > 0) && motion_class(screen, p, big) == 0 { retreat(&mut p, screen); }
             let class = motion_class(screen, p, big);
@@ -1046,11 +1062,14 @@ fn word_motion_kind(screen: &mut Screen, mut p: Position, count: usize, forward:
                 p = previous;
             }
         }
+        if p == previous { break; }
     }
     p
 }
 fn word_end_kind(screen: &mut Screen, mut p: Position, count: usize, big: bool) -> Position {
     for _ in 0..count {
+        if p.row == last_row(screen) && p.col + 1 == screen.size().1.get() { break; }
+        let previous = p;
         let class = motion_class(screen, p, big);
         if class != 0 {
             let mut next = p;
@@ -1075,6 +1094,7 @@ fn word_end_kind(screen: &mut Screen, mut p: Position, count: usize, big: bool) 
             if motion_class(screen, next, big) != class { break; }
             p = next;
         }
+        if p == previous { break; }
     }
     p
 }
@@ -1564,6 +1584,56 @@ mod tests {
         vim.cursor = Some(Position { row: 1, col: 4 });
         key(&mut vim, &mut screen, 'y'); key(&mut vim, &mut screen, 'a');
         assert!(matches!(vim.handle_key(&mut screen, Key::Char('(')).as_slice(), [Effect::Yank(s)] if s == "(b)"));
+    }
+
+    #[test]
+    fn huge_motion_counts_stop_at_reachable_boundaries() {
+        let mut screen = test_screen();
+        let mut vim = Vim::new();
+        normal(&mut vim, &mut screen);
+        for _ in 0..20 { key(&mut vim, &mut screen, '9'); }
+        key(&mut vim, &mut screen, 'l');
+        assert_eq!(vim.cursor(&mut screen).col, 7);
+        for _ in 0..20 { key(&mut vim, &mut screen, '9'); }
+        key(&mut vim, &mut screen, 'h');
+        assert_eq!(vim.cursor(&mut screen).col, 0);
+        key(&mut vim, &mut screen, 'y');
+        for _ in 0..20 { key(&mut vim, &mut screen, '9'); }
+        assert_eq!(vim.handle_key(&mut screen, Key::Char('l')), vec![Effect::Yank("one two".into())]);
+        for _ in 0..20 { key(&mut vim, &mut screen, '9'); }
+        key(&mut vim, &mut screen, 'b');
+        assert_eq!(vim.cursor(&mut screen), Position { row: 0, col: 0 });
+        key(&mut vim, &mut screen, 'G');
+        key(&mut vim, &mut screen, '$');
+        for _ in 0..20 { key(&mut vim, &mut screen, '9'); }
+        key(&mut vim, &mut screen, 'e');
+        assert_eq!(vim.cursor(&mut screen), Position { row: last_row(&screen), col: 7 });
+        key(&mut vim, &mut screen, 'w');
+        assert_eq!(vim.cursor(&mut screen), Position { row: last_row(&screen), col: 7 });
+    }
+
+    #[test]
+    fn huge_word_object_count_stops_at_last_nonblank_cell() {
+        let mut parser = vt100::Parser::new(NonZeroU16::new(1).unwrap(), NonZeroU16::new(3).unwrap(), 0);
+        parser.process(b"abc\x1b[1;1H");
+        let mut screen = parser.screen().clone();
+        let mut vim = Vim::new();
+        normal(&mut vim, &mut screen);
+        for _ in 0..20 { key(&mut vim, &mut screen, '9'); }
+        key(&mut vim, &mut screen, 'y');
+        key(&mut vim, &mut screen, 'i');
+        assert_eq!(vim.handle_key(&mut screen, Key::Char('w')), vec![Effect::Yank("abc".into())]);
+    }
+
+    #[test]
+    fn exclusive_word_yank_omits_first_cell_of_next_row() {
+        let mut parser = vt100::Parser::new(NonZeroU16::new(2).unwrap(), NonZeroU16::new(8).unwrap(), 8);
+        parser.process(b"foo\r\nbar\x1b[1;1H");
+        let mut screen = parser.screen().clone();
+        let mut vim = Vim::new();
+        normal(&mut vim, &mut screen);
+        key(&mut vim, &mut screen, 'y');
+        assert_eq!(vim.handle_key(&mut screen, Key::Char('w')), vec![Effect::Yank("foo\n".into())]);
     }
     #[test]
     fn visual_endpoint_swap_preserves_reversed_selection() {

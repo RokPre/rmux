@@ -200,6 +200,24 @@ class VimModeSessions(unittest.TestCase):
         self.wait_for(received.exists, 'application did not receive Insert-mode input')
         self.assertEqual(received.read_bytes(), payload)
 
+    def test_remapped_escape_preserves_following_application_input(self):
+        config = self.root / 'config' / 'rmux' / 'config.toml'
+        config.parent.mkdir()
+        config.write_text('[bindings]\nvim_normal = "ctrl+q"\nvim_left = "x"\n')
+        received = self.root / 'received'
+        ready = self.root / 'ready'
+        script = ('import os,tty,time; tty.setraw(0); '
+                  f'open({str(ready)!r},"w").close(); '
+                  'data=os.read(0,1); '
+                  f'open({str(received)!r},"wb").write(data); time.sleep(30)')
+        _, terminal, _ = self.start_shell_session(command='python3 -u -c ' + shlex.quote(script))
+        self.wait_for(ready.exists)
+        self.send_keys(terminal, b'\x11')
+        self.wait_for(lambda: self.latest_state() and self.latest_state()['mode'] == 'normal')
+        os.write(terminal, b'\x11x')
+        self.wait_for(lambda: received.exists() and received.stat().st_size == 1)
+        self.assertEqual(received.read_bytes(), b'x')
+
     def test_insert_input_does_not_publish_redundant_snapshots(self):
         ready = self.root / 'ready'
         received = self.root / 'received'

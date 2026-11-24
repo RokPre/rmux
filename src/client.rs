@@ -205,6 +205,7 @@ pub(crate) fn attach(
     if !response.ok {
         return Err(io::Error::other(response.error));
     }
+    ensure_vim_protocol(response.supports_vim_protocol)?;
     ensure_resize_support(config.resize.step_percent, response.supports_resize_step)?;
 
     let _raw_mode = RawMode::enable()?;
@@ -402,6 +403,16 @@ fn ensure_resize_support(step: u8, supported: bool) -> io::Result<()> {
     Ok(())
 }
 
+fn ensure_vim_protocol(supported: bool) -> io::Result<()> {
+    if !supported {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "session server does not support the Vim protocol; exit this session and restart it with the current rmux before attaching",
+        ));
+    }
+    Ok(())
+}
+
 fn ends_with_unpaired_escape(bytes: &[u8], previous_pending: bool) -> bool {
     let trailing = bytes.iter().rev().take_while(|&&byte| byte == 0x1b).count();
     let previous = if previous_pending && bytes.iter().all(|&byte| byte == 0x1b) {
@@ -501,6 +512,18 @@ fn handle_input_action(
 mod handshake_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn refuses_servers_without_vim_protocol_support() {
+        let error = ensure_vim_protocol(false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("exit this session and restart it"));
+    }
+
+    #[test]
+    fn accepts_servers_with_vim_protocol_support() {
+        ensure_vim_protocol(true).unwrap();
+    }
 
     #[test]
     fn response_and_initial_frame_in_one_write_are_both_read() {

@@ -1837,6 +1837,7 @@ fn identity_response(name: &str) -> Response {
         pid: std::process::id(),
         start_time: process_start_time(std::process::id()).unwrap_or_default(),
         supports_resize_step: true,
+        supports_vim_protocol: true,
     }
 }
 
@@ -1848,6 +1849,7 @@ fn error_response(error: &str) -> Response {
         pid: 0,
         start_time: 0,
         supports_resize_step: true,
+        supports_vim_protocol: true,
     }
 }
 

@@ -51,6 +51,17 @@ impl Binding {
     }
 }
 
+fn matching_binding<'a>(
+    bindings: &'a [Binding],
+    sequence: &[u8],
+    context: InputContext,
+) -> Option<&'a Binding> {
+    bindings
+        .iter()
+        .filter(|binding| binding.active_in(context) && binding.sequence == sequence)
+        .max_by_key(|binding| binding.vim_contexts.is_some())
+}
+
 const BINDINGS: &[(&[u8], u8, &[u8])] = &[
     (b"\x08", PREVIOUS_BUFFER, b""),
     (b"\x0c", NEXT_BUFFER, b""),
@@ -130,7 +141,9 @@ fn configured_bindings(config: &crate::config::Config) -> Vec<Binding> {
                     binding.vim_action.as_deref() == Some(action.as_str())
                         && binding.sequence == sequence;
                 !old_default_on_new_key
-                    && (binding.sequence != sequence || !binding.overlaps_contexts(contexts))
+                    && (binding.vim_contexts.is_none()
+                        || binding.sequence != sequence
+                        || !binding.overlaps_contexts(contexts))
             } else {
                 binding.command.kind != kind || binding.command.payload != payload
             }
@@ -265,7 +278,7 @@ fn default_vim_sequence(action: &str) -> Option<&'static [u8]> {
         "vim_insert_search" => b"\x06",
         "vim_scroll_half_down" => b"\x04",
         "vim_scroll_half_up" => b"\x15",
-        "vim_scroll_page_down" => b"\x06",
+        "vim_scroll_page_down" => b"\x1b[6~",
         "vim_scroll_page_up" => b"\x02",
         "vim_scroll_insert_down" => b"\x1bd",
         "vim_scroll_insert_up" => b"\x1bf",
@@ -430,13 +443,7 @@ impl InputDecoder {
                 continue;
             }
             if self.pending == b"\x1b" && byte == b'\x1b' {
-                if let Some(command) = self
-                    .bindings
-                    .iter()
-                    .find(|binding| {
-                        binding.sequence == self.pending
-                            && binding.active_in(self.pending_context)
-                    })
+                if let Some(command) = matching_binding(&self.bindings, &self.pending, self.pending_context)
                     .map(|binding| binding.command)
                 {
                     flush_passthrough(&mut actions, &mut passthrough);
@@ -455,11 +462,7 @@ impl InputDecoder {
                         && binding.sequence.first() == Some(&byte)
                 })
             {
-                if let Some(binding) = self.bindings.iter().find(|binding| {
-                    binding.active_in(context)
-                        && binding.sequence.len() == 1
-                        && binding.sequence[0] == byte
-                }) {
+                if let Some(binding) = matching_binding(&self.bindings, &[byte], context) {
                     flush_passthrough(&mut actions, &mut passthrough);
                     if !(binding.command.kind == VIM_KEY && binding.command.payload.is_empty()) {
                         actions.push(InputAction::Command(binding.command));
@@ -487,9 +490,7 @@ impl InputDecoder {
                     break;
                 }
 
-                let exact = self.bindings.iter().find(|binding| {
-                    binding.active_in(self.pending_context) && binding.sequence == self.pending
-                });
+                let exact = matching_binding(&self.bindings, &self.pending, self.pending_context);
                 let has_longer = self.bindings.iter().any(|binding| {
                     binding.active_in(self.pending_context)
                         && binding.sequence.len() > self.pending.len()
@@ -554,6 +555,9 @@ impl InputDecoder {
         context: InputContext,
         command: InputCommand,
     ) -> InputContext {
+        if context == InputContext::Search && command.kind == VIM_KEY && command.payload == b"\x1b" {
+            return self.context_after_raw_byte(context, b'\x1b');
+        }
         let next = context_after_command(context, command);
         if next == InputContext::Search && context != InputContext::Search {
             self.search_return_context = Some(context);
@@ -610,9 +614,7 @@ impl InputDecoder {
             .is_some_and(|remaining| remaining.is_zero())
         {
             self.last_input = None;
-            if let Some(binding) = self.bindings.iter().find(|binding| {
-                binding.sequence == self.pending && binding.active_in(self.pending_context)
-            }) {
+            if let Some(binding) = matching_binding(&self.bindings, &self.pending, self.pending_context) {
                 let command = binding.command;
                 self.pending.clear();
                 return Some(InputAction::Command(command));
@@ -629,14 +631,22 @@ fn flush_passthrough(actions: &mut Vec<InputAction>, bytes: &mut Vec<u8>) {
     }
 }
 fn context_after_command(context: InputContext, command: InputCommand) -> InputContext {
-    if matches!(command.kind, PREVIOUS_BUFFER | NEXT_BUFFER) {
+    if matches!(
+        command.kind,
+        PREVIOUS_BUFFER | NEXT_BUFFER | NEW_BUFFER | CLOSE_BUFFER | FOCUS_WINDOW | CLOSE_WINDOW
+    ) {
         return InputContext::AppDisabled;
     }
     if command.kind != VIM_KEY {
         return context;
     }
     match command.payload {
-        b"\x1b" | b"\x1b\x1b" => InputContext::Normal,
+        b"\x1b\x1b" => InputContext::Normal,
+        b"\x1b" => match context {
+            InputContext::Normal => InputContext::Insert,
+            InputContext::Visual => InputContext::Normal,
+            _ => context,
+        },
         b"i" => InputContext::Insert,
         b"v" | b"V" | b"\x16" => InputContext::Visual,
         b"/" | b"?" | b"\x06" => InputContext::Search,
@@ -1226,7 +1236,51 @@ mod tests {
     }
 
     #[test]
-    fn page_down_has_a_distinct_semantic_payload_and_old_ctrl_f_is_suppressed() {
+    fn focus_change_does_not_apply_old_buffer_vim_bindings() {
+        let mut config = crate::config::Config::default();
+        config.bindings.insert("vim_left".into(), "x".into());
+        let mut decoder = InputDecoder::configured(&config);
+        assert_eq!(
+            decoder.feed_with_context(b"\x1blx", InputContext::Normal),
+            vec![
+                InputAction::Command(InputCommand { kind: FOCUS_WINDOW, payload: b"l" }),
+                InputAction::Bytes(b"x".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn vim_remap_preserves_global_binding_in_other_modes() {
+        let mut config = crate::config::Config::default();
+        config.bindings.insert("vim_left".into(), "ctrl+h".into());
+        let mut decoder = InputDecoder::configured(&config);
+        assert_eq!(
+            decoder.feed_with_context(b"\x08", InputContext::Insert),
+            vec![InputAction::Command(InputCommand { kind: PREVIOUS_BUFFER, payload: b"" })]
+        );
+        assert_eq!(
+            decoder.feed_with_context(b"\x08", InputContext::Normal),
+            vec![InputAction::Command(InputCommand { kind: VIM_KEY, payload: b"h" })]
+        );
+    }
+
+    #[test]
+    fn remapped_escape_updates_context_before_next_key() {
+        let mut config = crate::config::Config::default();
+        config.bindings.insert("vim_normal".into(), "ctrl+q".into());
+        config.bindings.insert("vim_left".into(), "x".into());
+        let mut decoder = InputDecoder::configured(&config);
+        assert_eq!(
+            decoder.feed_with_context(b"\x11x", InputContext::Normal),
+            vec![
+                InputAction::Command(InputCommand { kind: VIM_KEY, payload: b"\x1b" }),
+                InputAction::Bytes(b"x".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn page_down_remap_preserves_ctrl_f_search() {
         let mut config = crate::config::Config::default();
         config.bindings.insert("vim_scroll_page_down".into(), "alt+p".into());
         let mut decoder = InputDecoder::configured(&config);
@@ -1239,7 +1293,7 @@ mod tests {
         );
         assert_eq!(
             decoder.feed_with_context(b"\x06", InputContext::Normal),
-            Vec::<InputAction>::new()
+            vec![InputAction::Bytes(b"\x06".to_vec())]
         );
     }
 
@@ -1319,7 +1373,7 @@ mod tests {
         );
         assert_eq!(
             decoder.feed_with_context(b"\x06", InputContext::Normal),
-            Vec::<InputAction>::new()
+            vec![InputAction::Bytes(b"\x06".to_vec())]
         );
     }
 
@@ -1353,7 +1407,7 @@ mod tests {
         let mut decoder = InputDecoder::configured(&config);
 
         assert_eq!(
-            decoder.feed_with_context(b"\x11x", InputContext::Normal),
+            decoder.feed_with_context(b"\x11x", InputContext::Visual),
             vec![
                 InputAction::Command(InputCommand {
                     kind: VIM_KEY,
