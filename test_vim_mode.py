@@ -222,6 +222,39 @@ class VimModeSessions(unittest.TestCase):
                       self.latest_state(buffer)['mode'] == 'insert',
                       'Esc did not return to Insert mode')
 
+    def test_alt_scroll_repeats_in_normal_and_visual_modes(self):
+        _, terminal, _ = self.start_shell_session(command="seq 1 100; sleep 30")
+        self.wait_for(lambda: self.latest_state() and
+                      self.latest_state()['history_len'] >= 20)
+        buffer = self.latest_state()['buffer']
+        for key, expected in [(b'\x1bd', 5), (b'\x1bd', 10), (b'\x1bf', 5)]:
+            self.send_keys(terminal, key)
+            self.wait_for(lambda: self.latest_state(buffer)['scrollback'] == expected,
+                          f'Alt scroll did not reach {expected} rows')
+            self.assertEqual(self.latest_state(buffer)['mode'], 'normal')
+
+        self.send_keys(terminal, b'v')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'visual')
+        self.send_keys(terminal, b'\x1bd')
+        self.wait_for(lambda: self.latest_state(buffer)['scrollback'] == 10)
+        self.assertEqual(self.latest_state(buffer)['mode'], 'visual')
+        self.assertIsNotNone(self.latest_state(buffer)['selection'])
+
+    def test_visual_shape_switch_preserves_selection(self):
+        _, terminal, _ = self.start_shell_session(command="printf 'abcdef\\033[H'; sleep 30")
+        self.wait_for(lambda: self.latest_state() is not None)
+        buffer = self.latest_state()['buffer']
+        self.send_keys(terminal, b'\x1b\x1b')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'normal')
+        self.send_keys(terminal, b'\x16l')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'visual-block' and
+                      self.latest_state(buffer)['cursor_col'] == 1)
+        initial = self.latest_state(buffer)['selection']
+        for key, mode in [(b'V', 'visual-line'), (b'v', 'visual'), (b'\x16', 'visual-block')]:
+            self.send_keys(terminal, key)
+            self.wait_for(lambda: self.latest_state(buffer)['mode'] == mode)
+            self.assertEqual(self.latest_state(buffer)['selection'], initial)
+
     def test_visual_yank_writes_exact_selection_to_fake_xclip(self):
         clipboard = self.root / 'clipboard'
         bin_dir = self.root / 'bin'

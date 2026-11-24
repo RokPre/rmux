@@ -170,8 +170,9 @@ fn action_contexts(action: &str) -> &'static [InputContext] {
     match action {
         "vim_normal" => &[Insert, Normal, Visual, Search],
         "vim_insert_search" => &[Insert],
-        "vim_insert" | "vim_visual" | "vim_visual_line" | "vim_visual_block" => &[Normal],
-        "vim_scroll_insert_down" | "vim_scroll_insert_up" => &[Insert],
+        "vim_insert" => &[Normal],
+        "vim_visual" | "vim_visual_line" | "vim_visual_block" => &[Normal, Visual],
+        "vim_scroll_insert_down" | "vim_scroll_insert_up" => &[Insert, Normal, Visual],
         _ => &[Normal, Visual],
     }
 }
@@ -1040,7 +1041,10 @@ mod tests {
         );
         assert_eq!(
             decoder.feed_with_context(b"\x1bx", InputContext::Normal),
-            vec![InputAction::Bytes(b"\x1bx".to_vec())]
+            vec![InputAction::Command(InputCommand {
+                kind: VIM_KEY,
+                payload: b"\x1bd",
+            })]
         );
         let actions = decoder.feed_with_context(b"query n\x1bz", InputContext::Search);
         assert!(actions
@@ -1065,6 +1069,81 @@ mod tests {
             vec![InputAction::Command(InputCommand {
                 kind: RENAME_BUFFER,
                 payload: b"",
+            })]
+        );
+    }
+
+
+    #[test]
+    fn configured_vim_insert_scroll_bindings_repeat_in_insert_normal_and_visual() {
+        let mut config = crate::config::Config::default();
+        config.bindings.extend([
+            ("vim_scroll_insert_down".into(), "alt+x".into()),
+            ("vim_scroll_insert_up".into(), "alt+y".into()),
+        ]);
+        let mut decoder = InputDecoder::configured(&config);
+        let input = b"\x1bx\x1by\x1bx\x1by";
+        let expected = vec![
+            InputAction::Command(InputCommand {
+                kind: VIM_KEY,
+                payload: b"\x1bd",
+            }),
+            InputAction::Command(InputCommand {
+                kind: VIM_KEY,
+                payload: b"\x1bf",
+            }),
+            InputAction::Command(InputCommand {
+                kind: VIM_KEY,
+                payload: b"\x1bd",
+            }),
+            InputAction::Command(InputCommand {
+                kind: VIM_KEY,
+                payload: b"\x1bf",
+            }),
+        ];
+
+        for context in [InputContext::Insert, InputContext::Normal, InputContext::Visual] {
+            assert_eq!(
+                decoder.feed_with_context(input, context),
+                expected,
+                "context {context:?}"
+            );
+        }
+        assert_eq!(
+            decoder.feed_with_context(input, InputContext::Search),
+            vec![InputAction::Bytes(input.to_vec())]
+        );
+    }
+
+    #[test]
+    fn configured_visual_shape_switches_are_available_while_visual() {
+        let mut config = crate::config::Config::default();
+        config.bindings.extend([
+            ("vim_visual".into(), "alt+x".into()),
+            ("vim_visual_line".into(), "alt+y".into()),
+            ("vim_visual_block".into(), "ctrl+g".into()),
+        ]);
+        let mut decoder = InputDecoder::configured(&config);
+
+        assert_eq!(
+            decoder.feed_with_context(b"\x1bx", InputContext::Visual),
+            vec![InputAction::Command(InputCommand {
+                kind: VIM_KEY,
+                payload: b"v",
+            })]
+        );
+        assert_eq!(
+            decoder.feed_with_context(b"\x1by", InputContext::Visual),
+            vec![InputAction::Command(InputCommand {
+                kind: VIM_KEY,
+                payload: b"V",
+            })]
+        );
+        assert_eq!(
+            decoder.feed_with_context(b"\x07", InputContext::Visual),
+            vec![InputAction::Command(InputCommand {
+                kind: VIM_KEY,
+                payload: b"\x16",
             })]
         );
     }

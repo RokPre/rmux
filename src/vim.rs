@@ -370,6 +370,8 @@ impl Vim {
         if self.mode == Mode::Search { return self.handle_search_key(screen, key); }
         match key {
             Key::Ctrl('f') => self.open_search(self.mode, Direction::Forward),
+            Key::Alt('d') => { self.scroll(screen, 5); Vec::new() }
+            Key::Alt('f') => { self.scroll(screen, -5); Vec::new() }
             Key::PageDown => { self.scroll(screen, -(screen.size().0.get() as i32)); Vec::new() }
             Key::Ctrl('d') => { let count = std::mem::take(&mut self.count).max(1); let page = (screen.size().0.get() as usize / 2).max(1).saturating_mul(count).min(i32::MAX as usize) as i32; self.scroll(screen, -page); Vec::new() }
             Key::Ctrl('u') => { let count = std::mem::take(&mut self.count).max(1); let page = (screen.size().0.get() as usize / 2).max(1).saturating_mul(count).min(i32::MAX as usize) as i32; self.scroll(screen, page); Vec::new() }
@@ -377,9 +379,9 @@ impl Vim {
             Key::Escape if matches!(self.mode, Mode::Visual(_)) => { self.mode = Mode::Normal; self.anchor = None; self.count = 0; self.pending_count = 0; self.pending.clear(); Vec::new() }
             Key::Escape => { screen.set_scrollback(0); self.mode = Mode::Insert; self.anchor = None; self.count = 0; self.pending_count = 0; self.pending.clear(); Vec::new() }
             Key::Char('i') if self.mode == Mode::Normal && self.pending.is_empty() => { screen.set_scrollback(0); self.mode = Mode::Insert; Vec::new() }
-            Key::Char('v') if self.mode == Mode::Normal => self.enter_visual(VisualKind::Character),
-            Key::Char('V') if self.mode == Mode::Normal => self.enter_visual(VisualKind::Line),
-            Key::Ctrl('v') if self.mode == Mode::Normal => self.enter_visual(VisualKind::Block),
+            Key::Char('v') => self.enter_visual(VisualKind::Character),
+            Key::Char('V') => self.enter_visual(VisualKind::Line),
+            Key::Ctrl('v') => self.enter_visual(VisualKind::Block),
             Key::Char('o') if matches!(self.mode, Mode::Visual(_)) => {
                 if let (Some(anchor), Some(cursor)) = (self.anchor, self.cursor) { self.anchor = Some(cursor); self.set_cursor(screen, anchor); }
                 Vec::new()
@@ -695,8 +697,10 @@ impl Vim {
     }
 
     fn enter_visual(&mut self, kind: VisualKind) -> Vec<Effect> {
+        if !matches!(self.mode, Mode::Visual(_)) {
+            self.anchor = self.cursor;
+        }
         self.mode = Mode::Visual(kind);
-        self.anchor = self.cursor;
         Vec::new()
     }
 
