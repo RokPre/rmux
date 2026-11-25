@@ -8,7 +8,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -46,6 +46,10 @@ pub(crate) const VIM_STATE: u8 = 7;
 pub(crate) const VIM_FLUSH: u8 = 19;
 pub(crate) const YANK: u8 = 8;
 pub(crate) const VIM_KEY: u8 = 20;
+pub(crate) const INPUT_SYNC: u8 = 21;
+pub(crate) const VIM_KEY_SYNC: u8 = 22;
+pub(crate) const VIM_FLUSH_SYNC: u8 = 23;
+pub(crate) const INPUT_ACK: u8 = 9;
 const MAX_FRAME: usize = 1024 * 1024;
 const SCROLLBACK_LIMIT: usize = 2000;
 const YANK_FLASH_DURATION: Duration = Duration::from_millis(400);
@@ -53,6 +57,7 @@ const YANK_FLASH_DURATION: Duration = Duration::from_millis(400);
 pub(crate) enum Outgoing {
     BufferSnapshot(Vec<u8>),
     BufferOutput(Vec<u8>),
+    InputAck(u64),
     HistorySnapshot(Vec<u8>),
     VimState(Vec<u8>),
     Yank(Vec<u8>),
@@ -69,6 +74,7 @@ struct Client {
     resize_step: u8,
     snapshot_only: Arc<AtomicBool>,
     refresh_pending: Arc<AtomicBool>,
+    last_input_seq: Option<u64>,
     pending_yanks: Vec<Vec<u8>>,
 }
 
@@ -82,6 +88,7 @@ struct Buffer {
     vim: crate::vim::Vim,
     yank_flash_deadline: Option<Instant>,
     app_control: crate::vim_control::AppControl,
+    pending_input_owner: Option<u64>,
 }
 
 #[derive(Default)]
@@ -207,6 +214,8 @@ struct VimSnapshot {
     app_control: bool,
     history_len: usize,
     scrollback: usize,
+    operator_pending: Option<String>,
+    operator_count_started: bool,
 }
 
 struct SessionState {
@@ -217,6 +226,7 @@ struct SessionState {
     layout: WindowLayout,
     history_offsets: HashMap<u64, usize>,
     next_buffer: u64,
+    layout_command_owner: Option<u64>,
 }
 struct Session {
     name: String,
@@ -224,8 +234,8 @@ struct Session {
     state: Mutex<SessionState>,
     next_client: AtomicU64,
     shutdown: std::sync::atomic::AtomicBool,
+    pending_input_changed: Condvar,
 }
-
 
 pub(crate) fn run_server(args: &[std::ffi::OsString]) -> io::Result<()> {
     let (name, socket_path, size, cwd, command) = parse_server_args(args)?;
@@ -268,9 +278,11 @@ pub(crate) fn run_server(args: &[std::ffi::OsString]) -> io::Result<()> {
             layout: WindowLayout::new(1),
             history_offsets: HashMap::new(),
             next_buffer: 2,
+            layout_command_owner: None,
         }),
         next_client: AtomicU64::new(1),
         shutdown: std::sync::atomic::AtomicBool::new(false),
+        pending_input_changed: Condvar::new(),
     });
     crate::debug_log(format_args!("server started session={name}"));
     spawn_output_reader(reader, Arc::clone(&session), 1);
@@ -412,13 +424,13 @@ fn spawn_buffer(
             vim: crate::vim::Vim::new(),
             yank_flash_deadline: None,
             app_control: crate::vim_control::AppControl::default(),
+            pending_input_owner: None,
         },
         reader,
     ))
 }
 fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session: Arc<Session>, buffer_id: u64) {
     thread::spawn(move || {
-
         let mut output = [0u8; 16 * 1024];
         loop {
             match reader.read(&mut output) {
@@ -429,10 +441,7 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session: Arc<Session>, 
                         let old_alternate = buffer.parser.screen().alternate_screen();
                         let old_history_len = buffer.parser.screen().scrollback_len();
                         let had_search_matches = !buffer.vim.search_matches().is_empty();
-                        let ris = buffer
-                            .parser
-                            .callbacks_mut()
-                            .observe_ris(&output[..length]);
+                        let ris = buffer.parser.callbacks_mut().observe_ris(&output[..length]);
                         buffer.parser.process(&output[..length]);
                         let history_len_changed =
                             buffer.parser.screen().scrollback_len() != old_history_len;
@@ -442,7 +451,11 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session: Arc<Session>, 
                         {
                             let screen = buffer.parser.screen_mut();
                             let alternate_changed = screen.alternate_screen() != old_alternate;
-                            let dropped_rows = if screen.alternate_screen() { 0 } else { dropped_rows };
+                            let dropped_rows = if screen.alternate_screen() {
+                                0
+                            } else {
+                                dropped_rows
+                            };
                             terminal_state_changed |= alternate_changed || dropped_rows > 0;
                             buffer.vim.history_changed(
                                 screen,
@@ -451,6 +464,11 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session: Arc<Session>, 
                             );
                         }
                         let app_control_changed = process_app_requests(buffer);
+                        if app_control_changed {
+                            buffer.vim.cancel_pending_sequence();
+                            buffer.pending_input_owner = None;
+                            session.pending_input_changed.notify_all();
+                        }
                         let replies = std::mem::take(&mut buffer.parser.callbacks_mut().pending);
                         if !replies.is_empty() && buffer.writer.write_all(&replies).is_err() {
                             break;
@@ -463,8 +481,8 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session: Arc<Session>, 
 
                             let history_offset =
                                 state.history_offsets.get(&buffer_id).copied().unwrap_or(0);
-                            let publish_metadata = state.buffers.get(&buffer_id).is_some_and(
-                                |buffer| {
+                            let publish_metadata =
+                                state.buffers.get(&buffer_id).is_some_and(|buffer| {
                                     should_publish_live_metadata(
                                         buffer.vim.mode(),
                                         buffer.app_control.is_enabled(),
@@ -476,8 +494,7 @@ fn spawn_output_reader(mut reader: Box<dyn Read + Send>, session: Arc<Session>, 
                                         buffer.vim.yank_flash().is_some(),
                                         history_offset,
                                     )
-                                },
-                            );
+                                });
                             if publish_metadata {
                                 send_vim_snapshot(&mut state, buffer_id);
                                 let updated_history_offset =
@@ -506,6 +523,122 @@ fn lock_state(session: &Session) -> std::sync::MutexGuard<'_, SessionState> {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
 }
+fn wait_for_pending_input<'a>(
+    session: &'a Session,
+    client_id: u64,
+    mut state: MutexGuard<'a, SessionState>,
+) -> MutexGuard<'a, SessionState> {
+    loop {
+        let blocked = active_buffer(&state)
+            .and_then(|active| state.buffers.get(&active))
+            .is_some_and(|buffer| {
+                buffer
+                    .pending_input_owner
+                    .is_some_and(|owner| owner != client_id)
+            });
+        let blocked_by_command = state
+            .layout_command_owner
+            .is_some_and(|owner| owner != client_id);
+        if !(blocked || blocked_by_command) || session.shutdown.load(Ordering::Acquire) {
+            return state;
+        }
+        state = session
+            .pending_input_changed
+            .wait_timeout(state, Duration::from_millis(100))
+            .unwrap_or_else(|poison| poison.into_inner())
+            .0;
+    }
+}
+
+fn update_pending_input_owner(buffer: &mut Buffer, client_id: u64) -> bool {
+    let previous_owner = buffer.pending_input_owner;
+    buffer.pending_input_owner = if buffer.app_control.is_enabled() {
+        None
+    } else if buffer.vim.has_pending_sequence() {
+        Some(previous_owner.unwrap_or(client_id))
+    } else {
+        None
+    };
+    previous_owner.is_some() && buffer.pending_input_owner.is_none()
+}
+struct LayoutCommandGuard<'a> {
+    session: &'a Session,
+    client_id: u64,
+}
+
+impl Drop for LayoutCommandGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = lock_state(self.session);
+        if state.layout_command_owner == Some(self.client_id) {
+            state.layout_command_owner = None;
+            self.session.pending_input_changed.notify_all();
+        }
+    }
+}
+
+fn reserve_layout_command(session: &Session, client_id: u64) -> LayoutCommandGuard<'_> {
+    let mut state = lock_state(session);
+    loop {
+        if session.shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        let pending_from_other_client = state.buffers.values().any(|buffer| {
+            buffer
+                .pending_input_owner
+                .is_some_and(|owner| owner != client_id)
+        });
+        if state.layout_command_owner.is_none()
+            && !pending_from_other_client
+            && !session.shutdown.load(Ordering::Acquire)
+        {
+            let cancelled: Vec<_> = state
+                .buffers
+                .iter_mut()
+                .filter_map(|(&buffer_id, buffer)| {
+                    (buffer.pending_input_owner == Some(client_id)).then(|| {
+                        buffer.vim.cancel_pending_sequence();
+                        buffer.pending_input_owner = None;
+                        buffer_id
+                    })
+                })
+                .collect();
+            for buffer_id in &cancelled {
+                send_vim_snapshot(&mut state, *buffer_id);
+            }
+            state.layout_command_owner = Some(client_id);
+            if !cancelled.is_empty() {
+                session.pending_input_changed.notify_all();
+            }
+            break;
+        }
+        state = session
+            .pending_input_changed
+            .wait_timeout(state, Duration::from_millis(100))
+            .unwrap_or_else(|poison| poison.into_inner())
+            .0;
+    }
+    LayoutCommandGuard { session, client_id }
+}
+
+fn is_layout_command(kind: u8) -> bool {
+    matches!(
+        kind,
+        NEW_BUFFER
+            | CLOSE_BUFFER
+            | PREVIOUS_BUFFER
+            | NEXT_BUFFER
+            | SPLIT_VERTICAL
+            | SPLIT_HORIZONTAL
+            | CLOSE_WINDOW
+            | FOCUS_WINDOW
+            | MOVE_WINDOW
+            | RESIZE_WINDOW
+            | REORDER_BUFFER_LEFT
+            | REORDER_BUFFER_RIGHT
+            | RENAME_BUFFER
+            | EQUALIZE_WINDOWS
+    )
+}
 fn active_buffer(state: &SessionState) -> Option<u64> {
     state.layout.focused_buffer()
 }
@@ -529,9 +662,9 @@ fn process_app_requests(buffer: &mut Buffer) -> bool {
     }
     let child_identity = buffer.child_identity;
     let session_id = buffer.session_id.map(|pid| pid as u32);
-    buffer.app_control.prune_dead(|identity| {
-        process_is_owned(identity, child_identity, session_id)
-    });
+    buffer
+        .app_control
+        .prune_dead(|identity| process_is_owned(identity, child_identity, session_id));
     was_enabled != buffer.app_control.is_enabled()
 }
 
@@ -555,7 +688,11 @@ fn process_stat(pid: u32) -> Option<ProcessStat> {
 }
 
 fn parse_process_stat(stat: &str) -> Option<ProcessStat> {
-    let fields = stat.rsplit_once(") ")?.1.split_whitespace().collect::<Vec<_>>();
+    let fields = stat
+        .rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
     Some(ProcessStat {
         state: fields.first()?.chars().next()?,
         parent_pid: fields.get(1)?.parse().ok()?,
@@ -563,9 +700,6 @@ fn parse_process_stat(stat: &str) -> Option<ProcessStat> {
         start_time: fields.get(19)?.parse().ok()?,
     })
 }
-
-
-
 
 fn process_is_owned(
     identity: crate::vim_control::ProcessIdentity,
@@ -675,26 +809,47 @@ fn send_vim_snapshot(state: &mut SessionState, id: u64) {
 
 fn vim_snapshot_payload(buffer: &mut Buffer, id: u64) -> Option<Vec<u8>> {
     let flash = buffer.vim.yank_flash();
+    let (operator_pending, operator_count_started) = buffer
+        .vim
+        .operator_pending()
+        .map_or((None, false), |(prefix, count_started)| {
+            (Some(prefix.to_owned()), count_started)
+        });
     let screen = buffer.parser.screen_mut();
     let cursor = buffer.vim.cursor(screen);
     let selection = buffer.vim.selection(screen).map(|range| {
-        (range.start.row, range.start.col, range.end.row, range.end.col)
+        (
+            range.start.row,
+            range.start.col,
+            range.end.row,
+            range.end.col,
+        )
     });
     let history_len = screen.scrollback_len();
-    let scrollback = flash.map_or(screen.scrollback(), |flash| flash_scrollback(flash, history_len));
+    let scrollback = flash.map_or(screen.scrollback(), |flash| {
+        flash_scrollback(flash, history_len)
+    });
     let (rows, _) = screen.size();
     let top = history_len.saturating_sub(scrollback);
     let bottom = top + usize::from(rows.get()) - 1;
     let matches = visible_matches(&buffer.vim, top, bottom);
     let mode = vim_mode_name(buffer.vim.mode());
-    let yank_selection = flash.map(|flash| (
-        flash.range.start.row, flash.range.start.col, flash.range.end.row, flash.range.end.col,
-    ));
-    let yank_mode = flash.map(|flash| match flash.kind {
-        crate::vim::VisualKind::Character => "visual",
-        crate::vim::VisualKind::Line => "visual-line",
-        crate::vim::VisualKind::Block => "visual-block",
-    }.to_owned());
+    let yank_selection = flash.map(|flash| {
+        (
+            flash.range.start.row,
+            flash.range.start.col,
+            flash.range.end.row,
+            flash.range.end.col,
+        )
+    });
+    let yank_mode = flash.map(|flash| {
+        match flash.kind {
+            crate::vim::VisualKind::Character => "visual",
+            crate::vim::VisualKind::Line => "visual-line",
+            crate::vim::VisualKind::Block => "visual-block",
+        }
+        .to_owned()
+    });
     serde_json::to_vec(&VimSnapshot {
         buffer: id,
         mode: mode.to_owned(),
@@ -704,12 +859,16 @@ fn vim_snapshot_payload(buffer: &mut Buffer, id: u64) -> Option<Vec<u8>> {
         selection,
         yank_selection,
         yank_mode,
-        active_match: matches.iter().position(|positions| positions.first() == Some(&(cursor.row, cursor.col))),
+        active_match: matches
+            .iter()
+            .position(|positions| positions.first() == Some(&(cursor.row, cursor.col))),
         matches,
         prompt: (mode == "search").then(|| buffer.vim.prompt_text().to_owned()),
         app_control: buffer.app_control.is_enabled(),
         history_len,
         scrollback,
+        operator_pending,
+        operator_count_started,
     })
     .ok()
 }
@@ -728,36 +887,41 @@ fn vim_mode_name(mode: crate::vim::Mode) -> &'static str {
 fn visible_matches(vim: &crate::vim::Vim, top: usize, bottom: usize) -> Vec<Vec<(usize, u16)>> {
     const MAX_MATCH_POSITIONS: usize = 8192;
     let mut positions = 0;
-    vim.search_matches().iter().filter_map(|matched| {
-        if matched.is_empty() || matched.iter().any(|p| p.row < top || p.row > bottom) {
-            return None;
-        }
-        if positions + matched.len() > MAX_MATCH_POSITIONS {
-            return None;
-        }
-        positions += matched.len();
-        Some(matched.iter().map(|p| (p.row, p.col)).collect())
-    }).collect()
+    vim.search_matches()
+        .iter()
+        .filter_map(|matched| {
+            if matched.is_empty() || matched.iter().any(|p| p.row < top || p.row > bottom) {
+                return None;
+            }
+            if positions + matched.len() > MAX_MATCH_POSITIONS {
+                return None;
+            }
+            positions += matched.len();
+            Some(matched.iter().map(|p| (p.row, p.col)).collect())
+        })
+        .collect()
 }
 
 fn expire_yank_flashes(session: &Session) {
     let now = Instant::now();
     let mut state = lock_state(session);
-    let expired: Vec<_> = state.buffers.iter_mut().filter_map(|(&id, buffer)| {
-        (buffer.yank_flash_deadline.is_some_and(|deadline| deadline <= now)).then(|| {
-            buffer.yank_flash_deadline = None;
-            buffer.vim.clear_yank_flash();
-            id
+    let expired: Vec<_> = state
+        .buffers
+        .iter_mut()
+        .filter_map(|(&id, buffer)| {
+            (buffer
+                .yank_flash_deadline
+                .is_some_and(|deadline| deadline <= now))
+            .then(|| {
+                buffer.yank_flash_deadline = None;
+                buffer.vim.clear_yank_flash();
+                id
+            })
         })
-    }).collect();
+        .collect();
     for id in expired {
         send_vim_snapshot(&mut state, id);
         send_buffer_history_snapshots(&mut state, id);
-    }
-}
-fn hold_yank(state: &mut SessionState, client_id: u64, bytes: Vec<u8>) {
-    if let Some(client) = state.clients.get_mut(&client_id) {
-        client.pending_yanks.push(bytes);
     }
 }
 
@@ -810,22 +974,29 @@ fn prune_app_controls(session: &Session) {
             buffer
                 .app_control
                 .prune_dead(|identity| process_is_owned(identity, child_identity, session_id));
-            (before != buffer.app_control.is_enabled()).then_some(id)
+            let changed = before != buffer.app_control.is_enabled();
+            if changed {
+                buffer.vim.cancel_pending_sequence();
+                buffer.pending_input_owner = None;
+            }
+            changed.then_some(id)
         })
         .collect();
+    let app_control_changed = !changed.is_empty();
     for id in changed {
         send_vim_snapshot(&mut state, id);
     }
+    if app_control_changed {
+        session.pending_input_changed.notify_all();
+    }
 }
-
 
 fn broadcast(state: &mut SessionState, message: Outgoing) {
     let mut disconnected = Vec::new();
     for (&id, client) in &state.clients {
         if client.snapshot_only.load(Ordering::Acquire) {
             if matches!(message, Outgoing::Close) {
-                if let Err(TrySendError::Disconnected(_)) =
-                    client.sender.try_send(Outgoing::Close)
+                if let Err(TrySendError::Disconnected(_)) = client.sender.try_send(Outgoing::Close)
                 {
                     disconnected.push(id);
                 }
@@ -844,17 +1015,14 @@ fn broadcast(state: &mut SessionState, message: Outgoing) {
             Outgoing::BufferOutput(bytes) => client
                 .sender
                 .try_send(Outgoing::BufferOutput(bytes.clone())),
-            Outgoing::VimState(bytes) => client
-                .sender
-                .try_send(Outgoing::VimState(bytes.clone())),
-            Outgoing::Yank(bytes) => client
-                .sender
-                .try_send(Outgoing::Yank(bytes.clone())),
+            Outgoing::VimState(bytes) => client.sender.try_send(Outgoing::VimState(bytes.clone())),
+            Outgoing::Yank(bytes) => client.sender.try_send(Outgoing::Yank(bytes.clone())),
             Outgoing::Layout(bytes) => client.sender.try_send(Outgoing::Layout(bytes.clone())),
             Outgoing::Refresh => client.sender.try_send(Outgoing::Refresh),
             Outgoing::HistorySnapshot(bytes) => client
                 .sender
                 .try_send(Outgoing::HistorySnapshot(bytes.clone())),
+            Outgoing::InputAck(sequence) => client.sender.try_send(Outgoing::InputAck(*sequence)),
             Outgoing::Close => client.sender.try_send(Outgoing::Close),
         };
         match result {
@@ -862,14 +1030,27 @@ fn broadcast(state: &mut SessionState, message: Outgoing) {
             Err(TrySendError::Full(_)) => {
                 client.snapshot_only.store(true, Ordering::Release);
                 client.refresh_pending.store(false, Ordering::Release);
-                crate::debug_log(format_args!(
-                    "client switched to snapshot-only client={id}"
-                ));
+                crate::debug_log(format_args!("client switched to snapshot-only client={id}"));
             }
         }
     }
     for id in disconnected {
         state.clients.remove(&id);
+    }
+}
+
+fn acknowledge_input(state: &mut SessionState, id: u64, input_seq: u64) {
+    let Some(client) = state.clients.get_mut(&id) else {
+        return;
+    };
+    client.last_input_seq = Some(client.last_input_seq.unwrap_or(0).max(input_seq));
+    match client.sender.try_send(Outgoing::InputAck(input_seq)) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            client.snapshot_only.store(true, Ordering::Release);
+            client.refresh_pending.store(true, Ordering::Release);
+        }
+        Err(TrySendError::Disconnected(_)) => {}
     }
 }
 
@@ -903,6 +1084,23 @@ fn handle_client(stream: UnixStream, session: Arc<Session>) -> io::Result<()> {
     Ok(())
 }
 
+fn decode_sequenced_input(kind: u8, payload: Vec<u8>) -> io::Result<(u8, Vec<u8>, Option<u64>)> {
+    let inner_kind = match kind {
+        INPUT_SYNC => INPUT,
+        VIM_KEY_SYNC => VIM_KEY,
+        VIM_FLUSH_SYNC => VIM_FLUSH,
+        _ => return Ok((kind, payload, None)),
+    };
+    if payload.len() < 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "short sequenced input frame",
+        ));
+    }
+    let sequence = u64::from_be_bytes(payload[..8].try_into().unwrap());
+    Ok((inner_kind, payload[8..].to_vec(), Some(sequence)))
+}
+
 fn attach_client(
     stream: UnixStream,
     mut reader: BufReader<UnixStream>,
@@ -912,7 +1110,10 @@ fn attach_client(
     let rows = request.rows.max(1);
     let cols = request.cols.max(1);
     let id = session.next_client.fetch_add(1, Ordering::Relaxed);
-    crate::debug_log(format_args!("client attached session={} client={id} size={cols}x{rows}", session.name));
+    crate::debug_log(format_args!(
+        "client attached session={} client={id} size={cols}x{rows}",
+        session.name
+    ));
     let (sender, receiver) = mpsc::sync_channel(64);
     let snapshot_only = Arc::new(AtomicBool::new(false));
     let refresh_pending = Arc::new(AtomicBool::new(false));
@@ -931,8 +1132,8 @@ fn attach_client(
                 resize_step: request.resize_step.clamp(1, 50),
                 snapshot_only: Arc::clone(&snapshot_only),
                 refresh_pending: Arc::clone(&refresh_pending),
+                last_input_seq: None,
                 pending_yanks: Vec::new(),
-
             },
         );
         resize_visible_buffers(&mut state);
@@ -960,9 +1161,18 @@ fn attach_client(
                 break;
             }
         };
+        let (kind, payload, input_seq) = match decode_sequenced_input(kind, payload) {
+            Ok(decoded) => decoded,
+            Err(_) => break,
+        };
+        let _layout_command = is_layout_command(kind).then(|| reserve_layout_command(&session, id));
+        if session.shutdown.load(Ordering::Acquire) {
+            break;
+        }
         match kind {
             INPUT | VIM_KEY => {
-                let mut state = lock_state(&session);
+                let mut state = wait_for_pending_input(&session, id, lock_state(&session));
+                let mut released_pending_input = false;
                 if let Some(active) = active_buffer(&state) {
                     let mut forwarded = Vec::new();
                     let mut yanks = Vec::new();
@@ -980,13 +1190,16 @@ fn attach_client(
                             let effects = buffer
                                 .vim
                                 .handle_bytes(buffer.parser.screen_mut(), &payload);
-                            buffer.yank_flash_deadline = buffer.vim.yank_flash()
+                            buffer.yank_flash_deadline = buffer
+                                .vim
+                                .yank_flash()
                                 .map(|_| Instant::now() + YANK_FLASH_DURATION);
-                            publish_vim_state = had_yank_flash || !is_insert_passthrough(
-                                was_insert,
-                                buffer.vim.mode() == crate::vim::Mode::Insert,
-                                &effects,
-                            );
+                            publish_vim_state = had_yank_flash
+                                || !is_insert_passthrough(
+                                    was_insert,
+                                    buffer.vim.mode() == crate::vim::Mode::Insert,
+                                    &effects,
+                                );
                             for effect in effects {
                                 match effect {
                                     crate::vim::Effect::Forward(bytes) => forwarded.extend(bytes),
@@ -1002,6 +1215,7 @@ fn attach_client(
                             }
                             let _ = buffer.writer.flush();
                         }
+                        released_pending_input |= update_pending_input_owner(buffer, id);
                     }
                     for bytes in yanks {
                         enqueue_yank(&mut state, id, bytes);
@@ -1011,11 +1225,27 @@ fn attach_client(
                         send_buffer_history_snapshots(&mut state, active);
                     }
                 }
+                if released_pending_input {
+                    session.pending_input_changed.notify_all();
+                }
+                if let Some(input_seq) = input_seq {
+                    acknowledge_input(&mut state, id, input_seq);
+                }
             }
             VIM_FLUSH if payload.is_empty() => {
-                let mut state = lock_state(&session);
+                let mut state = wait_for_pending_input(&session, id, lock_state(&session));
+                let mut released_pending_input = false;
                 if let Some(active) = active_buffer(&state) {
                     flush_vim_pending(&mut state, active, id);
+                    if let Some(buffer) = state.buffers.get_mut(&active) {
+                        released_pending_input = update_pending_input_owner(buffer, id);
+                    }
+                }
+                if released_pending_input {
+                    session.pending_input_changed.notify_all();
+                }
+                if let Some(input_seq) = input_seq {
+                    acknowledge_input(&mut state, id, input_seq);
                 }
             }
             RESIZE if payload.len() == 4 => {
@@ -1023,7 +1253,10 @@ fn attach_client(
                 if let Some(client) = state.clients.get_mut(&id) {
                     client.rows = u16::from_be_bytes([payload[0], payload[1]]).max(1);
                     client.cols = u16::from_be_bytes([payload[2], payload[3]]).max(1);
-                    crate::debug_log(format_args!("client resize client={id} size={}x{}", client.cols, client.rows));
+                    crate::debug_log(format_args!(
+                        "client resize client={id} size={}x{}",
+                        client.cols, client.rows
+                    ));
                 }
                 for buffer in state.buffers.values_mut() {
                     buffer.vim.clear_yank_flash();
@@ -1074,13 +1307,33 @@ fn attach_client(
     }
 
     {
-        crate::debug_log(format_args!("client detach session={} client={id}", session.name));
+        crate::debug_log(format_args!(
+            "client detach session={} client={id}",
+            session.name
+        ));
         let mut state = lock_state(&session);
+        let released_buffers: Vec<_> = state
+            .buffers
+            .iter_mut()
+            .filter_map(|(&buffer_id, buffer)| {
+                (buffer.pending_input_owner == Some(id)).then(|| {
+                    buffer.vim.cancel_pending_sequence();
+                    buffer.pending_input_owner = None;
+                    buffer_id
+                })
+            })
+            .collect();
         if let Some(client) = state.clients.remove(&id) {
             let _ = client.stream.shutdown(std::net::Shutdown::Both);
         }
         resize_visible_buffers(&mut state);
         send_visible_buffer_snapshots(&mut state);
+        for buffer_id in &released_buffers {
+            send_vim_snapshot(&mut state, *buffer_id);
+        }
+        if !released_buffers.is_empty() {
+            session.pending_input_changed.notify_all();
+        }
     }
     Ok(())
 }
@@ -1438,7 +1691,11 @@ fn resize_visible_buffers(state: &mut SessionState) {
             let dropped_rows =
                 std::mem::take(&mut buffer.parser.callbacks_mut().dropped_primary_rows);
             let screen = buffer.parser.screen_mut();
-            let dropped_rows = if screen.alternate_screen() { 0 } else { dropped_rows };
+            let dropped_rows = if screen.alternate_screen() {
+                0
+            } else {
+                dropped_rows
+            };
             let new_scrollback = resize_scrollback(
                 old_scrollback,
                 old_top,
@@ -1447,7 +1704,9 @@ fn resize_visible_buffers(state: &mut SessionState) {
             );
             screen.set_scrollback(new_scrollback);
             let alternate_changed = was_alternate != screen.alternate_screen();
-            buffer.vim.history_changed(screen, Some(dropped_rows), alternate_changed);
+            buffer
+                .vim
+                .history_changed(screen, Some(dropped_rows), alternate_changed);
             buffer.vim.resized(screen);
             let offset = screen.scrollback();
             state.history_offsets.insert(id, offset);
@@ -1460,7 +1719,10 @@ fn reap_exited_buffers(session: &Session) -> io::Result<bool> {
     let mut exited = Vec::new();
     for (&id, buffer) in &mut state.buffers {
         if let Some(status) = buffer.child.try_wait().map_err(io::Error::other)? {
-            crate::debug_log(format_args!("buffer exited session={} buffer={id} status={status:?}", session.name));
+            crate::debug_log(format_args!(
+                "buffer exited session={} buffer={id} status={status:?}",
+                session.name
+            ));
             exited.push(id);
         }
     }
@@ -1519,11 +1781,19 @@ fn output_loop(
             break;
         }
         if snapshot_only.load(Ordering::Acquire) {
-            if let Outgoing::Yank(bytes) = message {
-                hold_yank(&mut lock_state(&session), id, bytes);
-            }
-            if write_recovery_snapshot(&mut stream, &receiver, &session, id, &refresh_pending)
-                .is_err()
+            let dequeued_yanks = match message {
+                Outgoing::Yank(bytes) => vec![bytes],
+                _ => Vec::new(),
+            };
+            if write_recovery_snapshot(
+                &mut stream,
+                &receiver,
+                &session,
+                id,
+                &refresh_pending,
+                dequeued_yanks,
+            )
+            .is_err()
             {
                 break;
             }
@@ -1533,8 +1803,15 @@ fn output_loop(
             break;
         }
         if snapshot_only.load(Ordering::Acquire)
-            && write_recovery_snapshot(&mut stream, &receiver, &session, id, &refresh_pending)
-                .is_err()
+            && write_recovery_snapshot(
+                &mut stream,
+                &receiver,
+                &session,
+                id,
+                &refresh_pending,
+                Vec::new(),
+            )
+            .is_err()
         {
             break;
         }
@@ -1547,6 +1824,7 @@ fn write_message(stream: &mut UnixStream, message: Outgoing) -> io::Result<()> {
         Outgoing::BufferSnapshot(bytes) => write_frame(stream, BUFFER_SNAPSHOT, &bytes),
         Outgoing::BufferOutput(bytes) => write_frame(stream, BUFFER_OUTPUT, &bytes),
         Outgoing::Yank(bytes) => write_frame(stream, YANK, &bytes),
+        Outgoing::InputAck(sequence) => write_frame(stream, INPUT_ACK, &sequence.to_be_bytes()),
         Outgoing::Layout(snapshot) => write_frame(stream, WINDOW_STATE, &snapshot),
         Outgoing::HistorySnapshot(bytes) => write_frame(stream, HISTORY_SNAPSHOT, &bytes),
         Outgoing::VimState(bytes) => write_frame(stream, VIM_STATE, &bytes),
@@ -1561,6 +1839,7 @@ fn write_recovery_snapshot(
     session: &Session,
     id: u64,
     refresh_pending: &AtomicBool,
+    mut dequeued_yanks: Vec<Vec<u8>>,
 ) -> io::Result<()> {
     loop {
         let snapshots = {
@@ -1580,7 +1859,12 @@ fn write_recovery_snapshot(
             if closed {
                 return write_frame(stream, CLOSE, &[]);
             }
-            prepend_queued_yanks(&mut state, id, queued_yanks);
+            prepend_queued_yanks(
+                &mut state,
+                id,
+                std::mem::take(&mut dequeued_yanks),
+                queued_yanks,
+            );
             refresh_pending.store(false, Ordering::Release);
             recovery_snapshot(&mut state, id)
         };
@@ -1590,7 +1874,7 @@ fn write_recovery_snapshot(
 
         match receiver.try_recv() {
             Ok(Outgoing::Yank(bytes)) => {
-                hold_yank(&mut lock_state(session), id, bytes);
+                dequeued_yanks.push(bytes);
                 refresh_pending.store(false, Ordering::Release);
             }
             Ok(Outgoing::Close) => return write_frame(stream, CLOSE, &[]),
@@ -1611,10 +1895,16 @@ fn write_recovery_snapshot(
     }
 }
 
-fn prepend_queued_yanks(state: &mut SessionState, client_id: u64, mut queued: Vec<Vec<u8>>) {
+fn prepend_queued_yanks(
+    state: &mut SessionState,
+    client_id: u64,
+    mut dequeued_yanks: Vec<Vec<u8>>,
+    mut queued_yanks: Vec<Vec<u8>>,
+) {
+    dequeued_yanks.append(&mut queued_yanks);
     if let Some(client) = state.clients.get_mut(&client_id) {
-        queued.append(&mut client.pending_yanks);
-        client.pending_yanks = queued;
+        dequeued_yanks.append(&mut client.pending_yanks);
+        client.pending_yanks = dequeued_yanks;
     }
 }
 
@@ -1689,13 +1979,19 @@ fn recovery_snapshot(state: &mut SessionState, client_id: u64) -> Vec<Outgoing> 
             }
         }
     }
+    if let Some(sequence) = state
+        .clients
+        .get(&client_id)
+        .and_then(|client| client.last_input_seq)
+    {
+        messages.push(Outgoing::InputAck(sequence));
+    }
     messages
 }
 
 fn hidden_buffer_ids(buffer_ids: impl Iterator<Item = u64>, visible: &HashSet<u64>) -> Vec<u64> {
     buffer_ids.filter(|id| !visible.contains(id)).collect()
 }
-
 
 fn history_snapshot(
     state: &mut SessionState,
@@ -1749,7 +2045,6 @@ fn history_snapshot_chunks(
     }
     chunks
 }
-
 
 fn close_clients(state: &mut SessionState) {
     for (_, client) in state.clients.drain() {
@@ -1838,6 +2133,7 @@ fn identity_response(name: &str) -> Response {
         start_time: process_start_time(std::process::id()).unwrap_or_default(),
         supports_resize_step: true,
         supports_vim_protocol: true,
+        supports_input_ack: true,
     }
 }
 
@@ -1850,6 +2146,7 @@ fn error_response(error: &str) -> Response {
         start_time: 0,
         supports_resize_step: true,
         supports_vim_protocol: true,
+        supports_input_ack: false,
     }
 }
 
@@ -1939,28 +2236,83 @@ mod history_tests {
         assert!(should_publish(false, false, true));
         assert!(should_publish(false, true, false));
         assert!(should_publish_live_metadata(
-            Mode::Normal, false, false, false, false, false, false, false, 0,
+            Mode::Normal,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            0,
         ));
         assert!(should_publish_live_metadata(
-            Mode::Search, false, false, false, false, false, false, false, 0,
+            Mode::Search,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            0,
         ));
         assert!(should_publish_live_metadata(
-            Mode::Insert, false, true, false, false, false, false, false, 0,
+            Mode::Insert,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            0,
         ));
         assert!(should_publish_live_metadata(
-            Mode::Insert, false, false, true, false, false, false, false, 0,
+            Mode::Insert,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            0,
         ));
         assert!(should_publish_live_metadata(
-            Mode::Insert, true, false, false, false, false, false, false, 0,
+            Mode::Insert,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            0,
         ));
         assert!(should_publish_live_metadata(
-            Mode::Insert, false, false, false, false, false, false, true, 0,
+            Mode::Insert,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            0,
         ));
         assert!(should_publish_live_metadata(
-            Mode::Insert, false, false, false, false, false, false, false, 1,
+            Mode::Insert,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            1,
         ));
     }
-
 
     #[test]
     fn server_scrollback_is_bounded_and_csi_three_j_clears_it() {
@@ -2007,10 +2359,7 @@ mod history_tests {
         parser.process(b"\x1bc");
         assert_eq!(parser.screen().scrollback_len(), 0);
         assert!(!parser.screen().alternate_screen());
-        assert!(!parser
-            .screen()
-            .contents_formatted()
-            .contains("before"));
+        assert!(!parser.screen().contents_formatted().contains("before"));
     }
 
     #[test]
@@ -2045,11 +2394,8 @@ mod history_tests {
         fields[1] = "1";
         fields[3] = "42";
         fields[19] = "99";
-        let owner_stat = parse_process_stat(&format!(
-            "123 (nvim worker) {}",
-            fields.join(" ")
-        ))
-        .unwrap();
+        let owner_stat =
+            parse_process_stat(&format!("123 (nvim worker) {}", fields.join(" "))).unwrap();
         assert_eq!(owner_stat.state, 'Z');
 
         let child = ProcessStat {
@@ -2066,13 +2412,18 @@ mod history_tests {
             pid: 42,
             start_time: 10,
         };
-        assert!(!process_is_owned_with(owner, Some(child_identity), Some(42), |pid| {
-            match pid {
-                123 => Some(owner_stat),
-                42 => Some(child),
-                _ => None,
+        assert!(!process_is_owned_with(
+            owner,
+            Some(child_identity),
+            Some(42),
+            |pid| {
+                match pid {
+                    123 => Some(owner_stat),
+                    42 => Some(child),
+                    _ => None,
+                }
             }
-        }));
+        ));
     }
 
     #[test]
@@ -2109,7 +2460,12 @@ mod history_tests {
             44 => Some(owner_stat),
             _ => None,
         };
-        assert!(process_is_owned_with(owner, Some(child_identity), Some(42), &mut get_stat));
+        assert!(process_is_owned_with(
+            owner,
+            Some(child_identity),
+            Some(42),
+            &mut get_stat
+        ));
 
         let reused_pid = crate::vim_control::ProcessIdentity {
             pid: 44,
@@ -2124,7 +2480,7 @@ mod history_tests {
     }
 
     #[test]
-    fn queued_yanks_precede_newer_pending_yanks_during_recovery() {
+    fn recovery_preserves_yank_order_across_dequeued_queued_and_pending() {
         let (stream, _peer) = UnixStream::pair().unwrap();
         let (sender, _receiver) = mpsc::sync_channel(1);
         let mut clients = HashMap::new();
@@ -2138,6 +2494,7 @@ mod history_tests {
                 resize_step: 5,
                 snapshot_only: Arc::new(AtomicBool::new(true)),
                 refresh_pending: Arc::new(AtomicBool::new(false)),
+                last_input_seq: None,
                 pending_yanks: vec![b"newer".to_vec()],
             },
         );
@@ -2149,29 +2506,106 @@ mod history_tests {
             layout: WindowLayout::new(1),
             history_offsets: HashMap::new(),
             next_buffer: 2,
+            layout_command_owner: None,
         };
 
         prepend_queued_yanks(
             &mut state,
             7,
+            vec![b"dequeued".to_vec()],
             vec![b"older-1".to_vec(), b"older-2".to_vec()],
         );
         assert_eq!(
             state.clients[&7].pending_yanks,
-            [b"older-1".to_vec(), b"older-2".to_vec(), b"newer".to_vec()]
+            [
+                b"dequeued".to_vec(),
+                b"older-1".to_vec(),
+                b"older-2".to_vec(),
+                b"newer".to_vec()
+            ]
         );
     }
 
+    #[test]
+    fn recovery_writes_dequeued_yank_before_queued_and_pending_yanks() {
+        let (mut stream, mut peer) = UnixStream::pair().unwrap();
+        let (sender, receiver) = mpsc::sync_channel(4);
+        sender
+            .try_send(Outgoing::Yank(b"queued-1".to_vec()))
+            .unwrap();
+        sender
+            .try_send(Outgoing::Yank(b"queued-2".to_vec()))
+            .unwrap();
+        let client_id = 7;
+        let mut clients = HashMap::new();
+        clients.insert(
+            client_id,
+            Client {
+                sender,
+                stream: stream.try_clone().unwrap(),
+                rows: 24,
+                cols: 80,
+                resize_step: 5,
+                snapshot_only: Arc::new(AtomicBool::new(true)),
+                refresh_pending: Arc::new(AtomicBool::new(false)),
+                last_input_seq: None,
+                pending_yanks: vec![b"pending".to_vec()],
+            },
+        );
+        let session = Session {
+            name: "test".into(),
+            cwd: PathBuf::new(),
+            state: Mutex::new(SessionState {
+                clients,
+                buffers: HashMap::new(),
+                buffer_names: HashMap::new(),
+                order: Vec::new(),
+                layout: WindowLayout::new(1),
+                history_offsets: HashMap::new(),
+                next_buffer: 2,
+                layout_command_owner: None,
+            }),
+            next_client: AtomicU64::new(8),
+            shutdown: AtomicBool::new(false),
+            pending_input_changed: Condvar::new(),
+        };
+        let refresh_pending = AtomicBool::new(false);
+
+        write_recovery_snapshot(
+            &mut stream,
+            &receiver,
+            &session,
+            client_id,
+            &refresh_pending,
+            vec![b"dequeued".to_vec()],
+        )
+        .unwrap();
+
+        let mut yanks = Vec::new();
+        while yanks.len() < 4 {
+            let (kind, payload) = read_frame(&mut peer).unwrap().unwrap();
+            if kind == YANK {
+                yanks.push(payload);
+            }
+        }
+        assert_eq!(
+            yanks,
+            [
+                b"dequeued".to_vec(),
+                b"queued-1".to_vec(),
+                b"queued-2".to_vec(),
+                b"pending".to_vec(),
+            ]
+        );
+    }
 
     #[test]
     fn recovery_retains_a_yank_dequeued_before_snapshot() {
         let (stream, _peer) = UnixStream::pair().unwrap();
         let (sender, receiver) = mpsc::sync_channel(1);
         let client_id = 7;
-        assert!(sender
-            .try_send(Outgoing::Yank(b"copied".to_vec()))
-            .is_ok());
-        let Outgoing::Yank(bytes) = receiver.try_recv().unwrap() else {
+        assert!(sender.try_send(Outgoing::Yank(b"copied".to_vec())).is_ok());
+        let Outgoing::Yank(_) = receiver.try_recv().unwrap() else {
             unreachable!();
         };
         let mut clients = HashMap::new();
@@ -2185,6 +2619,7 @@ mod history_tests {
                 resize_step: 5,
                 snapshot_only: Arc::new(AtomicBool::new(true)),
                 refresh_pending: Arc::new(AtomicBool::new(false)),
+                last_input_seq: Some(17),
                 pending_yanks: Vec::new(),
             },
         );
@@ -2196,25 +2631,62 @@ mod history_tests {
             layout: WindowLayout::new(1),
             history_offsets: HashMap::new(),
             next_buffer: 2,
+            layout_command_owner: None,
         };
 
-        hold_yank(&mut state, client_id, b"copied".to_vec());
+        prepend_queued_yanks(&mut state, client_id, vec![b"copied".to_vec()], Vec::new());
         let messages = recovery_snapshot(&mut state, client_id);
         assert!(matches!(
             messages.get(1),
             Some(Outgoing::Yank(bytes)) if bytes.as_slice() == b"copied"
         ));
         assert!(state.clients[&client_id].pending_yanks.is_empty());
+        assert!(matches!(messages.last(), Some(Outgoing::InputAck(17))));
     }
 
+    #[test]
+    fn recovery_does_not_emit_ack_for_legacy_client_without_sequenced_input() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let client_id = 7;
+        let mut clients = HashMap::new();
+        clients.insert(
+            client_id,
+            Client {
+                sender,
+                stream,
+                rows: 24,
+                cols: 80,
+                resize_step: 5,
+                snapshot_only: Arc::new(AtomicBool::new(true)),
+                refresh_pending: Arc::new(AtomicBool::new(false)),
+                last_input_seq: None,
+                pending_yanks: Vec::new(),
+            },
+        );
+        let mut state = SessionState {
+            clients,
+            buffers: HashMap::new(),
+            buffer_names: HashMap::new(),
+            order: Vec::new(),
+            layout: WindowLayout::new(1),
+            history_offsets: HashMap::new(),
+            next_buffer: 2,
+            layout_command_owner: None,
+        };
+
+        let messages = recovery_snapshot(&mut state, client_id);
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, Outgoing::InputAck(_)))
+        );
+    }
 
     #[test]
     fn snapshot_recovery_includes_hidden_buffers_for_state_sync() {
         let visible = HashSet::from([1, 3]);
-        assert_eq!(
-            hidden_buffer_ids([1, 2, 3].into_iter(), &visible),
-            vec![2]
-        );
+        assert_eq!(hidden_buffer_ids([1, 2, 3].into_iter(), &visible), vec![2]);
     }
     #[test]
     fn zero_offset_history_snapshot_contains_only_its_header() {

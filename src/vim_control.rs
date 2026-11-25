@@ -102,14 +102,20 @@ mod tests {
 
     #[test]
     fn parses_only_exact_supported_requests() {
-        assert_eq!(parse_request(b"777;rmux-app;acquire;42"), Some(AppRequest {
-            action: AppAction::Acquire,
-            pid: 42,
-        }));
-        assert_eq!(parse_request(b"777;rmux-app;release;42"), Some(AppRequest {
-            action: AppAction::Release,
-            pid: 42,
-        }));
+        assert_eq!(
+            parse_request(b"777;rmux-app;acquire;42"),
+            Some(AppRequest {
+                action: AppAction::Acquire,
+                pid: 42,
+            })
+        );
+        assert_eq!(
+            parse_request(b"777;rmux-app;release;42"),
+            Some(AppRequest {
+                action: AppAction::Release,
+                pid: 42,
+            })
+        );
         for invalid in [
             &b"777;rmux-app;other;42"[..],
             b"777;rmux-app;acquire;0",
@@ -127,16 +133,37 @@ mod tests {
     fn release_removes_only_its_owner_and_is_idempotent() {
         let first = identity(10, 100);
         let second = identity(20, 200);
-        let acquire = AppRequest { action: AppAction::Acquire, pid: 10 };
+        let acquire = AppRequest {
+            action: AppAction::Acquire,
+            pid: 10,
+        };
         let mut control = AppControl::default();
         assert!(control.apply(acquire, first));
         assert!(control.apply(acquire, first));
-        assert!(control.apply(AppRequest { pid: 20, action: AppAction::Acquire }, second));
+        assert!(control.apply(
+            AppRequest {
+                pid: 20,
+                action: AppAction::Acquire
+            },
+            second
+        ));
         assert_eq!(control.owner_count(), 2);
-        assert!(control.apply(AppRequest { pid: 10, action: AppAction::Release }, first));
+        assert!(control.apply(
+            AppRequest {
+                pid: 10,
+                action: AppAction::Release
+            },
+            first
+        ));
         assert!(control.is_enabled());
         assert_eq!(control.owner_count(), 1);
-        assert!(control.apply(AppRequest { pid: 10, action: AppAction::Release }, first));
+        assert!(control.apply(
+            AppRequest {
+                pid: 10,
+                action: AppAction::Release
+            },
+            first
+        ));
         assert_eq!(control.owner_count(), 1);
     }
 
@@ -145,9 +172,27 @@ mod tests {
         let owner = identity(7, 100);
         let reused_pid = identity(7, 200);
         let mut control = AppControl::default();
-        assert!(control.apply(AppRequest { pid: 7, action: AppAction::Acquire }, owner));
-        assert!(!control.apply(AppRequest { pid: 8, action: AppAction::Release }, owner));
-        assert!(control.apply(AppRequest { pid: 7, action: AppAction::Release }, reused_pid));
+        assert!(control.apply(
+            AppRequest {
+                pid: 7,
+                action: AppAction::Acquire
+            },
+            owner
+        ));
+        assert!(!control.apply(
+            AppRequest {
+                pid: 8,
+                action: AppAction::Release
+            },
+            owner
+        ));
+        assert!(control.apply(
+            AppRequest {
+                pid: 7,
+                action: AppAction::Release
+            },
+            reused_pid
+        ));
         assert!(control.is_enabled());
         assert_eq!(control.owner_count(), 1);
     }
@@ -158,7 +203,13 @@ mod tests {
         let second = identity(2, 22);
         let mut control = AppControl::default();
         for owner in [first, second] {
-            control.apply(AppRequest { action: AppAction::Acquire, pid: owner.pid }, owner);
+            control.apply(
+                AppRequest {
+                    action: AppAction::Acquire,
+                    pid: owner.pid,
+                },
+                owner,
+            );
         }
         control.prune_dead(|owner| owner == second);
         assert!(control.is_enabled());

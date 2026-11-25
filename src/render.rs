@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
@@ -9,8 +9,8 @@ use crossterm::style::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use vt100::{Cell, Color as VtColor, Parser, Screen};
 
-use crate::layout::{Divider, LayoutGeometry, LayoutSnapshot, PaneRect};
 use crate::input::InputContext;
+use crate::layout::{Divider, LayoutGeometry, LayoutSnapshot, PaneRect};
 
 pub(crate) const BUFFER_SNAPSHOT: u8 = 4;
 pub(crate) const BUFFER_OUTPUT: u8 = 5;
@@ -35,6 +35,10 @@ struct VimView {
     app_control: bool,
     history_len: usize,
     scrollback: usize,
+    #[serde(default)]
+    operator_pending: Option<String>,
+    #[serde(default)]
+    operator_count_started: bool,
 }
 fn incremental_view(view: &VimView) -> bool {
     view.mode == "insert"
@@ -52,6 +56,7 @@ pub(crate) struct Renderer {
     history_parsers: HashMap<u64, Parser>,
     history_offsets: HashMap<u64, usize>,
     vim: HashMap<u64, VimView>,
+    operator_sync_pending: HashSet<u64>,
     prompt: Option<(String, usize)>,
     bracketed_paste: Option<bool>,
     config: crate::config::Config,
@@ -68,7 +73,6 @@ struct RenderedPane {
     cells: Vec<Option<Cell>>,
 }
 
-
 impl Default for Renderer {
     fn default() -> Self {
         Self::with_config(crate::config::Config::default())
@@ -83,6 +87,7 @@ impl Renderer {
             history_parsers: HashMap::new(),
             history_offsets: HashMap::new(),
             vim: HashMap::new(),
+            operator_sync_pending: HashSet::new(),
             prompt: None,
             bracketed_paste: None,
             config,
@@ -170,6 +175,7 @@ impl Renderer {
                     self.safe_output = None;
                     self.rendered.clear();
                 }
+                self.operator_sync_pending.insert(view.buffer);
                 self.vim.insert(view.buffer, view);
             }
             _ => return Err(invalid_frame("invalid renderer frame")),
@@ -177,6 +183,11 @@ impl Renderer {
         Ok(())
     }
     pub(crate) fn set_layout(&mut self, snapshot: LayoutSnapshot) {
+        let previous_active = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.active_buffer);
+        let active_buffer = snapshot.active_buffer;
         self.safe_output = None;
         self.rendered.clear();
         self.parsers
@@ -185,8 +196,17 @@ impl Renderer {
             .retain(|buffer, _| snapshot.buffers.contains(buffer));
         self.history_offsets
             .retain(|buffer, _| snapshot.buffers.contains(buffer));
-        self.vim.retain(|buffer, _| snapshot.buffers.contains(buffer));
+        self.vim
+            .retain(|buffer, _| snapshot.buffers.contains(buffer));
+        self.operator_sync_pending
+            .retain(|buffer| snapshot.buffers.contains(buffer));
         self.snapshot = Some(snapshot);
+        if previous_active != active_buffer
+            && let Some(buffer) = active_buffer
+            && self.vim.contains_key(&buffer)
+        {
+            self.operator_sync_pending.insert(buffer);
+        }
     }
 
     pub(crate) fn active_buffer(&self) -> Option<(u64, String)> {
@@ -198,6 +218,16 @@ impl Renderer {
             .cloned()
             .unwrap_or_else(|| buffer.to_string());
         Some((buffer, name))
+    }
+
+    pub(crate) fn take_operator_pending(&mut self) -> Option<(Option<String>, bool)> {
+        let buffer = self.snapshot.as_ref()?.active_buffer?;
+        if !self.operator_sync_pending.remove(&buffer) {
+            return None;
+        }
+        self.vim
+            .get(&buffer)
+            .map(|view| (view.operator_pending.clone(), view.operator_count_started))
     }
 
     pub(crate) fn input_context(&self) -> InputContext {
@@ -235,9 +265,13 @@ impl Renderer {
             return Ok(());
         };
         let bracketed_paste = snapshot.active_buffer.is_some_and(|buffer| {
-            let showing_flash = self.vim.get(&buffer)
+            let showing_flash = self
+                .vim
+                .get(&buffer)
                 .is_some_and(|view| view.yank_selection.is_some());
-            let live_setting = self.parsers.get(&buffer)
+            let live_setting = self
+                .parsers
+                .get(&buffer)
                 .is_some_and(|parser| parser.screen().bracketed_paste());
             bracketed_paste_enabled(
                 self.prompt.is_some(),
@@ -255,6 +289,7 @@ impl Renderer {
             self.bracketed_paste = Some(bracketed_paste);
         }
         let geometry = snapshot.geometry(cols, rows);
+        let vim_colors = ResolvedVimColors::new(&self.config);
         queue!(output, Hide)?;
         if rows >= 3 {
             if let Some((prompt, _)) = self.prompt.as_ref() {
@@ -264,7 +299,13 @@ impl Renderer {
                 .and_then(|buffer| self.vim.get(&buffer))
                 .and_then(|view| view.prompt.as_ref())
             {
-                draw_header_line(output, &format!("/{prompt}"), cols, &self.config)?;
+                draw_search_prompt_line(
+                    output,
+                    &format!("/{prompt}"),
+                    cols,
+                    &self.config,
+                    vim_colors,
+                )?;
             } else {
                 draw_buffer_line(output, snapshot, cols, &geometry, &self.config)?;
             }
@@ -273,10 +314,14 @@ impl Renderer {
             && rows >= 3
             && geometry.windows.iter().all(|placement| {
                 !self.history_parsers.contains_key(&placement.buffer)
-                    && self.vim.get(&placement.buffer).is_some_and(incremental_view)
-                    && self.parsers.get(&placement.buffer).is_some_and(|parser| {
-                        !parser.screen().alternate_screen()
-                    })
+                    && self
+                        .vim
+                        .get(&placement.buffer)
+                        .is_some_and(incremental_view)
+                    && self
+                        .parsers
+                        .get(&placement.buffer)
+                        .is_some_and(|parser| !parser.screen().alternate_screen())
             });
         let can_diff = can_cache && self.safe_output.is_some();
         let mut next_rendered = Vec::new();
@@ -288,9 +333,8 @@ impl Renderer {
                 .get(&placement.buffer)
                 .copied()
                 .unwrap_or_else(|| view.map_or(0, |view| view.scrollback));
-            let absolute_top = view.map_or(0, |view| {
-                view.history_len.saturating_sub(history_offset)
-            });
+            let absolute_top =
+                view.map_or(0, |view| view.history_len.saturating_sub(history_offset));
             let parser = self
                 .history_parsers
                 .get(&placement.buffer)
@@ -310,10 +354,7 @@ impl Renderer {
                         && prior.terminal == (cols, rows)
                 })
                 .map(|index| old_rendered.remove(index));
-            if can_diff
-                && Some(placement.buffer) != self.safe_output
-                && prior.is_some()
-            {
+            if can_diff && Some(placement.buffer) != self.safe_output && prior.is_some() {
                 next_rendered.push(prior.unwrap());
                 continue;
             }
@@ -328,7 +369,15 @@ impl Renderer {
                         prior,
                     )?;
                 } else {
-                    draw_pane(output, placement.rect, Some(parser), view, absolute_top, &self.config)?;
+                    draw_pane(
+                        output,
+                        placement.rect,
+                        Some(parser),
+                        view,
+                        absolute_top,
+                        &self.config,
+                        vim_colors,
+                    )?;
                 }
                 if let Some(cells) = current {
                     next_rendered.push(RenderedPane {
@@ -341,7 +390,15 @@ impl Renderer {
                     });
                 }
             } else {
-                draw_pane(output, placement.rect, parser, view, absolute_top, &self.config)?;
+                draw_pane(
+                    output,
+                    placement.rect,
+                    parser,
+                    view,
+                    absolute_top,
+                    &self.config,
+                    vim_colors,
+                )?;
             }
         }
         self.rendered = next_rendered;
@@ -383,7 +440,10 @@ impl Renderer {
                     centered_origin(placement.rect, (size.0.get(), size.1.get()));
                 let vim_cursor = self.vim.get(&placement.buffer).filter(|view| {
                     !view.app_control
-                        && matches!(view.mode.as_str(), "normal" | "visual" | "visual-line" | "visual-block")
+                        && matches!(
+                            view.mode.as_str(),
+                            "normal" | "visual" | "visual-line" | "visual-block"
+                        )
                 });
                 let (cursor_row, cursor_col) = if let Some(view) = vim_cursor {
                     let offset = self
@@ -407,7 +467,11 @@ impl Renderer {
                     && cursor_row < usize::from(height)
                     && cursor_col < usize::from(width)
                 {
-                    queue!(output, MoveTo(left + cursor_col as u16, top + cursor_row as u16), Show)?;
+                    queue!(
+                        output,
+                        MoveTo(left + cursor_col as u16, top + cursor_row as u16),
+                        Show
+                    )?;
                 }
             }
         }
@@ -580,7 +644,42 @@ fn draw_header_line(
         .rename_background
         .as_deref()
         .unwrap_or(&config.buffer_line.background);
-    let intensity = if config.buffer_line.bold {
+    draw_styled_header_line(
+        output,
+        line,
+        cols,
+        crate::config::parse_color(foreground).unwrap(),
+        crate::config::parse_color(background).unwrap(),
+        config.buffer_line.bold,
+    )
+}
+
+fn draw_search_prompt_line(
+    output: &mut impl Write,
+    line: &str,
+    cols: u16,
+    config: &crate::config::Config,
+    colors: ResolvedVimColors,
+) -> io::Result<()> {
+    draw_styled_header_line(
+        output,
+        line,
+        cols,
+        colors.search_prompt_foreground,
+        colors.search_prompt_background,
+        config.buffer_line.bold,
+    )
+}
+
+fn draw_styled_header_line(
+    output: &mut impl Write,
+    line: &str,
+    cols: u16,
+    foreground: Color,
+    background: Color,
+    bold: bool,
+) -> io::Result<()> {
+    let intensity = if bold {
         Attribute::Bold
     } else {
         Attribute::NormalIntensity
@@ -588,8 +687,8 @@ fn draw_header_line(
     queue!(
         output,
         MoveTo(0, 0),
-        SetBackgroundColor(crate::config::parse_color(background).unwrap()),
-        SetForegroundColor(crate::config::parse_color(foreground).unwrap()),
+        SetBackgroundColor(background),
+        SetForegroundColor(foreground),
         SetAttribute(intensity)
     )?;
     let mut visible = String::new();
@@ -617,6 +716,7 @@ fn draw_pane(
     vim: Option<&VimView>,
     absolute_top: usize,
     config: &crate::config::Config,
+    vim_colors: ResolvedVimColors,
 ) -> io::Result<()> {
     let Some(parser) = parser else {
         return draw_pattern(output, rect, config);
@@ -654,7 +754,14 @@ fn draw_pane(
                     .active_match
                     .and_then(|index| view.matches.get(index))
                     .is_some_and(|positions| positions.contains(&(absolute_row, col)));
-                apply_match_style(&mut style, selected, yanked, matched, active_match);
+                apply_match_style(
+                    &mut style,
+                    selected,
+                    yanked,
+                    matched,
+                    active_match,
+                    vim_colors,
+                );
             }
             apply_cell_style(output, previous_style, style)?;
             previous_style = Some(style);
@@ -670,10 +777,7 @@ fn draw_pane(
     }
     queue!(output, SetAttribute(Attribute::Reset))
 }
-fn rendered_cells(
-    screen: &Screen,
-    origin: (u16, u16, u16, u16),
-) -> Vec<Option<Cell>> {
+fn rendered_cells(screen: &Screen, origin: (u16, u16, u16, u16)) -> Vec<Option<Cell>> {
     let (_, _, width, height) = origin;
     let mut cells = Vec::with_capacity(usize::from(width) * usize::from(height));
     for row in 0..height {
@@ -697,7 +801,10 @@ fn draw_pane_diff(
         if previous.cells.get(index) == Some(cell) {
             continue;
         }
-        if cell.as_ref().is_some_and(|cell| cell.is_wide_continuation()) {
+        if cell
+            .as_ref()
+            .is_some_and(|cell| cell.is_wide_continuation())
+        {
             continue;
         }
         let row = index / usize::from(width);
@@ -739,7 +846,6 @@ fn draw_pane_diff(
     queue!(output, SetAttribute(Attribute::Reset))
 }
 
-
 fn bracketed_paste_enabled(
     prompt_active: bool,
     showing_history: bool,
@@ -759,10 +865,7 @@ fn selection_contains(view: &VimView, row: usize, col: u16) -> bool {
     match view.selection_mode.as_deref().unwrap_or(&view.mode) {
         "visual-line" => true,
         "visual-block" => (start_col.min(end_col)..=start_col.max(end_col)).contains(&col),
-        "visual" => {
-            (row > start_row || col >= start_col)
-                && (row < end_row || col <= end_col)
-        }
+        "visual" => (row > start_row || col >= start_col) && (row < end_row || col <= end_col),
         _ => false,
     }
 }
@@ -778,8 +881,7 @@ fn yank_selection_contains(view: &VimView, row: usize, col: u16) -> bool {
         Some("visual-line") => true,
         Some("visual-block") => (start_col.min(end_col)..=start_col.max(end_col)).contains(&col),
         Some("visual") => {
-            (row > start_row || col >= start_col)
-                && (row < end_row || col <= end_col)
+            (row > start_row || col >= start_col) && (row < end_row || col <= end_col)
         }
         _ => false,
     }
@@ -792,24 +894,87 @@ fn match_contains(view: &VimView, row: usize, col: u16) -> bool {
         .any(|&(match_row, match_col)| match_row == row && match_col == col)
 }
 
-fn apply_match_style(style: &mut CellStyle, selected: bool, yanked: bool, matched: bool, active_match: bool) {
-    // Tokyo Night palette from dotFiles/globalTheme.toml.
-    let background = Color::Rgb { r: 0x1a, g: 0x1b, b: 0x26 };
-    let foreground = Color::Rgb { r: 0xc0, g: 0xca, b: 0xf5 };
-    let blue = Color::Rgb { r: 0x7a, g: 0xa2, b: 0xf7 };
-    let orange = Color::Rgb { r: 0xff, g: 0x9e, b: 0x64 };
-    let selection = Color::Rgb { r: 0x28, g: 0x34, b: 0x57 };
-    if yanked || (!selected && active_match) {
-        style.foreground = background;
-        style.background = orange;
-        style.inverse = false;
+#[derive(Clone, Copy)]
+struct ResolvedVimColors {
+    search_prompt_foreground: Color,
+    search_prompt_background: Color,
+    search_match_foreground: Color,
+    search_match_background: Color,
+    search_current_foreground: Color,
+    search_current_background: Color,
+    selection_foreground: Color,
+    selection_background: Color,
+    yank_foreground: Color,
+    yank_background: Color,
+}
+
+impl ResolvedVimColors {
+    fn new(config: &crate::config::Config) -> Self {
+        let colors = &config.vim_colors;
+        let parse = |value: &str| crate::config::parse_color(value).unwrap();
+        let fallback_prompt_foreground = config
+            .buffer_line
+            .rename_foreground
+            .as_deref()
+            .unwrap_or(&config.buffer_line.focused_foreground);
+        let fallback_prompt_background = config
+            .buffer_line
+            .rename_background
+            .as_deref()
+            .unwrap_or(&config.buffer_line.background);
+        Self {
+            search_prompt_foreground: parse(
+                colors
+                    .search_prompt_foreground
+                    .as_deref()
+                    .unwrap_or(fallback_prompt_foreground),
+            ),
+            search_prompt_background: parse(
+                colors
+                    .search_prompt_background
+                    .as_deref()
+                    .unwrap_or(fallback_prompt_background),
+            ),
+            search_match_foreground: parse(&colors.search_match_foreground),
+            search_match_background: parse(&colors.search_match_background),
+            search_current_foreground: parse(&colors.search_current_foreground),
+            search_current_background: parse(&colors.search_current_background),
+            selection_foreground: parse(&colors.selection_foreground),
+            selection_background: parse(&colors.selection_background),
+            yank_foreground: parse(&colors.yank_foreground),
+            yank_background: parse(&colors.yank_background),
+        }
+    }
+}
+
+fn apply_match_style(
+    style: &mut CellStyle,
+    selected: bool,
+    yanked: bool,
+    matched: bool,
+    active_match: bool,
+    colors: ResolvedVimColors,
+) {
+    let color = if yanked {
+        Some((colors.yank_foreground, colors.yank_background))
     } else if selected {
-        style.foreground = foreground;
-        style.background = selection;
-        style.inverse = false;
+        Some((colors.selection_foreground, colors.selection_background))
+    } else if active_match {
+        Some((
+            colors.search_current_foreground,
+            colors.search_current_background,
+        ))
     } else if matched {
-        style.foreground = background;
-        style.background = blue;
+        Some((
+            colors.search_match_foreground,
+            colors.search_match_background,
+        ))
+    } else {
+        None
+    };
+    if let Some((foreground, background)) = color {
+        style.foreground = foreground;
+        style.background = background;
         style.inverse = false;
     }
 }
@@ -1108,7 +1273,9 @@ mod tests {
                 "history_len": 0,
                 "scrollback": 0
             });
-            renderer.apply_frame(VIM_STATE, &serde_json::to_vec(&state).unwrap()).unwrap();
+            renderer
+                .apply_frame(VIM_STATE, &serde_json::to_vec(&state).unwrap())
+                .unwrap();
             assert_eq!(renderer.input_context(), expected);
         }
         let state = serde_json::json!({
@@ -1124,8 +1291,161 @@ mod tests {
             "history_len": 0,
             "scrollback": 0
         });
-        renderer.apply_frame(VIM_STATE, &serde_json::to_vec(&state).unwrap()).unwrap();
+        renderer
+            .apply_frame(VIM_STATE, &serde_json::to_vec(&state).unwrap())
+            .unwrap();
         assert_eq!(renderer.input_context(), InputContext::AppDisabled);
+    }
+
+    #[test]
+    fn shared_operator_snapshot_keeps_remapped_inner_object_selector_for_each_client() {
+        let mut config = crate::config::Config::default();
+        config.bindings.insert("vim_yank_inner".into(), "x".into());
+        let mut clients = [
+            (
+                Renderer::with_config(config.clone()),
+                crate::input::InputDecoder::configured(&config),
+            ),
+            (
+                Renderer::with_config(config.clone()),
+                crate::input::InputDecoder::configured(&config),
+            ),
+        ];
+        let layout = || LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 1 },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1],
+            buffer_names: HashMap::new(),
+        };
+        let snapshot = |operator_pending: &str, operator_count_started: bool| {
+            serde_json::json!({
+                "buffer": 1,
+                "mode": "normal",
+                "selection_mode": null,
+                "cursor_row": 0,
+                "cursor_col": 0,
+                "selection": null,
+                "matches": [],
+                "active_match": null,
+                "prompt": null,
+                "app_control": false,
+                "history_len": 0,
+                "scrollback": 0,
+                "operator_pending": operator_pending,
+                "operator_count_started": operator_count_started
+            })
+        };
+        for (renderer, decoder) in &mut clients {
+            renderer.set_layout(layout());
+            let state = serde_json::to_vec(&snapshot("y", false)).unwrap();
+            renderer.apply_frame(VIM_STATE, &state).unwrap();
+            if let Some((operator_pending, count_started)) = renderer.take_operator_pending() {
+                decoder.sync_operator(operator_pending.as_deref(), count_started);
+            }
+        }
+
+        let (_, client_decoder) = &mut clients[1];
+        let actions = client_decoder.feed_with_context(b"x", InputContext::Normal);
+        assert_eq!(
+            actions,
+            vec![crate::input::InputAction::Command(
+                crate::input::InputCommand {
+                    kind: crate::server::VIM_KEY,
+                    payload: b"i",
+                }
+            )]
+        );
+
+        let state = serde_json::to_vec(&snapshot("yi", false)).unwrap();
+        for (renderer, decoder) in &mut clients {
+            renderer.apply_frame(VIM_STATE, &state).unwrap();
+            if let Some((operator_pending, count_started)) = renderer.take_operator_pending() {
+                decoder.sync_operator(operator_pending.as_deref(), count_started);
+            }
+            assert_eq!(
+                decoder.feed_with_context(b"w", InputContext::Normal),
+                vec![crate::input::InputAction::Bytes(b"w".to_vec())]
+            );
+        }
+    }
+
+    #[test]
+    fn operator_count_started_survives_snapshot_and_zero_selector_input() {
+        let config = crate::config::Config::default();
+        let mut renderer = Renderer::with_config(config.clone());
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 1 },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1],
+            buffer_names: HashMap::new(),
+        });
+        let state = serde_json::json!({
+            "buffer": 1,
+            "mode": "normal",
+            "cursor_row": 0,
+            "cursor_col": 0,
+            "selection": null,
+            "matches": [],
+            "active_match": null,
+            "prompt": null,
+            "app_control": false,
+            "history_len": 0,
+            "scrollback": 0,
+            "operator_pending": "yi",
+            "operator_count_started": true
+        });
+        renderer
+            .apply_frame(VIM_STATE, &serde_json::to_vec(&state).unwrap())
+            .unwrap();
+        let mut decoder = crate::input::InputDecoder::configured(&config);
+        let (operator_pending, count_started) = renderer.take_operator_pending().unwrap();
+        assert_eq!(operator_pending.as_deref(), Some("yi"));
+        assert!(count_started);
+        decoder.sync_operator(operator_pending.as_deref(), count_started);
+        assert_eq!(
+            decoder.feed_with_context(b"0w", InputContext::Normal),
+            vec![crate::input::InputAction::Bytes(b"0w".to_vec())]
+        );
+    }
+
+    #[test]
+    fn absent_operator_snapshot_does_not_clear_local_pending_state() {
+        let mut renderer = Renderer::default();
+        let mut decoder = crate::input::InputDecoder::default();
+        renderer.set_layout(LayoutSnapshot {
+            tree: crate::layout::WindowNode::Window { id: 1, buffer: 1 },
+            focused_window: 1,
+            active_buffer: Some(1),
+            buffers: vec![1],
+            buffer_names: HashMap::new(),
+        });
+        let legacy_state = serde_json::json!({
+            "buffer": 1,
+            "mode": "normal",
+            "cursor_row": 0,
+            "cursor_col": 0,
+            "selection": null,
+            "matches": [],
+            "active_match": null,
+            "prompt": null,
+            "app_control": false,
+            "history_len": 0,
+            "scrollback": 0
+        });
+        renderer
+            .apply_frame(VIM_STATE, &serde_json::to_vec(&legacy_state).unwrap())
+            .unwrap();
+        if let Some((operator_pending, count_started)) = renderer.take_operator_pending() {
+            decoder.sync_operator(operator_pending.as_deref(), count_started);
+        }
+        decoder.feed_with_context(b"y", InputContext::Normal);
+        assert_eq!(renderer.take_operator_pending(), None);
+        assert_eq!(
+            decoder.feed_with_context(b"w", InputContext::Normal),
+            vec![crate::input::InputAction::Bytes(b"w".to_vec())]
+        );
     }
 
     #[test]
@@ -1180,11 +1500,7 @@ mod tests {
         output.extend_from_slice(b"\x1b[1;1H!");
         renderer.apply_frame(BUFFER_OUTPUT, &output).unwrap();
         assert_eq!(
-            renderer.parsers[&7]
-                .screen()
-                .cell(0, 0)
-                .unwrap()
-                .contents(),
+            renderer.parsers[&7].screen().cell(0, 0).unwrap().contents(),
             "!"
         );
         assert_eq!(
@@ -1202,7 +1518,6 @@ mod tests {
             .unwrap();
         assert!(!renderer.history_parsers.contains_key(&7));
     }
-
 
     #[test]
     fn drawing_centers_the_buffer_over_the_pattern() {
@@ -1752,6 +2067,8 @@ mod tests {
             app_control: false,
             history_len: 12,
             scrollback: 6,
+            operator_pending: None,
+            operator_count_started: false,
         };
 
         // The local viewport is absolute rows 6..8: a selection beginning in
@@ -1797,6 +2114,8 @@ mod tests {
             app_control: false,
             history_len: 8,
             scrollback: 4,
+            operator_pending: None,
+            operator_count_started: false,
         };
         assert!(yank_selection_contains(&view, 5, 3));
         assert!(!yank_selection_contains(&view, 5, 1));
@@ -1804,7 +2123,9 @@ mod tests {
     }
 
     #[test]
-    fn search_and_visual_highlights_use_contrasting_colors_and_selection_wins() {
+    fn search_and_visual_highlights_use_configured_colors_and_selection_priority() {
+        let config = crate::config::Config::default();
+        let colors = ResolvedVimColors::new(&config);
         let mut style = CellStyle {
             foreground: Color::White,
             background: Color::Black,
@@ -1815,22 +2136,228 @@ mod tests {
             inverse: true,
         };
 
-        apply_match_style(&mut style, false, false, true, false);
-        assert_eq!(style.foreground, Color::Rgb { r: 0x1a, g: 0x1b, b: 0x26 });
-        assert_eq!(style.background, Color::Rgb { r: 0x7a, g: 0xa2, b: 0xf7 });
+        apply_match_style(&mut style, false, false, true, false, colors);
+        assert_eq!(
+            style.foreground,
+            Color::Rgb {
+                r: 0x1a,
+                g: 0x1b,
+                b: 0x26
+            }
+        );
+        assert_eq!(
+            style.background,
+            Color::Rgb {
+                r: 0x7a,
+                g: 0xa2,
+                b: 0xf7
+            }
+        );
         assert!(!style.inverse);
 
-        apply_match_style(&mut style, false, false, true, true);
-        assert_eq!(style.foreground, Color::Rgb { r: 0x1a, g: 0x1b, b: 0x26 });
-        assert_eq!(style.background, Color::Rgb { r: 0xff, g: 0x9e, b: 0x64 });
+        apply_match_style(&mut style, false, false, true, true, colors);
+        assert_eq!(
+            style.foreground,
+            Color::Rgb {
+                r: 0x1a,
+                g: 0x1b,
+                b: 0x26
+            }
+        );
+        assert_eq!(
+            style.background,
+            Color::Rgb {
+                r: 0xff,
+                g: 0x9e,
+                b: 0x64
+            }
+        );
 
-        apply_match_style(&mut style, true, false, true, true);
-        assert_eq!(style.foreground, Color::Rgb { r: 0xc0, g: 0xca, b: 0xf5 });
-        assert_eq!(style.background, Color::Rgb { r: 0x28, g: 0x34, b: 0x57 });
+        apply_match_style(&mut style, true, false, true, true, colors);
+        assert_eq!(
+            style.foreground,
+            Color::Rgb {
+                r: 0xc0,
+                g: 0xca,
+                b: 0xf5
+            }
+        );
+        assert_eq!(
+            style.background,
+            Color::Rgb {
+                r: 0x28,
+                g: 0x34,
+                b: 0x57
+            }
+        );
         assert!(!style.inverse);
-        apply_match_style(&mut style, true, true, true, true);
-        assert_eq!(style.foreground, Color::Rgb { r: 0x1a, g: 0x1b, b: 0x26 });
-        assert_eq!(style.background, Color::Rgb { r: 0xff, g: 0x9e, b: 0x64 });
+        apply_match_style(&mut style, true, true, true, true, colors);
+        assert_eq!(
+            style.foreground,
+            Color::Rgb {
+                r: 0x1a,
+                g: 0x1b,
+                b: 0x26
+            }
+        );
+        assert_eq!(
+            style.background,
+            Color::Rgb {
+                r: 0xff,
+                g: 0x9e,
+                b: 0x64
+            }
+        );
+    }
+
+    #[test]
+    fn configured_vim_colors_style_rendered_cells_with_expected_priority() {
+        let mut config = crate::config::Config::default();
+        config.vim_colors.search_match_foreground = "#010203".into();
+        config.vim_colors.search_match_background = "#040506".into();
+        config.vim_colors.search_current_foreground = "#070809".into();
+        config.vim_colors.search_current_background = "#0a0b0c".into();
+        config.vim_colors.selection_foreground = "#0d0e0f".into();
+        config.vim_colors.selection_background = "#101112".into();
+        config.vim_colors.yank_foreground = "#131415".into();
+        config.vim_colors.yank_background = "#161718".into();
+        let vim_colors = ResolvedVimColors::new(&config);
+        let mut parser = Parser::new(
+            std::num::NonZeroU16::new(1).unwrap(),
+            std::num::NonZeroU16::new(6).unwrap(),
+            0,
+        );
+        parser.process(b"abcdef");
+        let view = VimView {
+            buffer: 1,
+            mode: "visual".into(),
+            cursor_row: 0,
+            cursor_col: 3,
+            selection: Some((0, 2, 0, 3)),
+            yank_selection: Some((0, 3, 0, 4)),
+            yank_mode: Some("visual".into()),
+            selection_mode: None,
+            matches: vec![vec![(0, 1)], vec![(0, 0), (0, 2), (0, 4)]],
+            active_match: Some(0),
+            prompt: None,
+            app_control: false,
+            history_len: 0,
+            scrollback: 0,
+            operator_pending: None,
+            operator_count_started: false,
+        };
+        let mut output = Vec::new();
+        draw_pane(
+            &mut output,
+            PaneRect {
+                x: 0,
+                y: 0,
+                width: 6,
+                height: 1,
+            },
+            Some(&parser),
+            Some(&view),
+            0,
+            &config,
+            vim_colors,
+        )
+        .unwrap();
+        let mut terminal = Parser::new(
+            std::num::NonZeroU16::new(1).unwrap(),
+            std::num::NonZeroU16::new(6).unwrap(),
+            0,
+        );
+        terminal.process(&output);
+        if !std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
+            let screen = terminal.screen();
+            assert_eq!(screen.cell(0, 0).unwrap().fgcolor(), VtColor::Rgb(1, 2, 3));
+            assert_eq!(screen.cell(0, 0).unwrap().bgcolor(), VtColor::Rgb(4, 5, 6));
+            assert_eq!(screen.cell(0, 1).unwrap().fgcolor(), VtColor::Rgb(7, 8, 9));
+            assert_eq!(
+                screen.cell(0, 1).unwrap().bgcolor(),
+                VtColor::Rgb(10, 11, 12)
+            );
+            assert_eq!(
+                screen.cell(0, 2).unwrap().fgcolor(),
+                VtColor::Rgb(13, 14, 15)
+            );
+            assert_eq!(
+                screen.cell(0, 2).unwrap().bgcolor(),
+                VtColor::Rgb(16, 17, 18)
+            );
+            assert_eq!(
+                screen.cell(0, 3).unwrap().bgcolor(),
+                VtColor::Rgb(22, 23, 24)
+            );
+            assert_eq!(
+                screen.cell(0, 4).unwrap().bgcolor(),
+                VtColor::Rgb(22, 23, 24)
+            );
+            assert_eq!(screen.cell(0, 5).unwrap().fgcolor(), VtColor::Default);
+        }
+    }
+
+    #[test]
+    fn search_prompt_colors_are_independent_from_rename_prompt_colors() {
+        let config: crate::config::Config = toml::from_str(
+            "[buffer_line]\nrename_foreground = \"#010203\"\nrename_background = \"#040506\"\n\
+             [vim_colors]\nsearch_prompt_foreground = \"#070809\"\nsearch_prompt_background = \"#0a0b0c\"\n",
+        )
+        .unwrap();
+        let mut search_output = Vec::new();
+        draw_search_prompt_line(
+            &mut search_output,
+            "/needle",
+            10,
+            &config,
+            ResolvedVimColors::new(&config),
+        )
+        .unwrap();
+        let mut rename_output = Vec::new();
+        draw_header_line(&mut rename_output, "Rename:", 10, &config).unwrap();
+        let mut search_terminal = Parser::new(
+            std::num::NonZeroU16::new(3).unwrap(),
+            std::num::NonZeroU16::new(10).unwrap(),
+            0,
+        );
+        search_terminal.process(&search_output);
+        let mut rename_terminal = Parser::new(
+            std::num::NonZeroU16::new(3).unwrap(),
+            std::num::NonZeroU16::new(10).unwrap(),
+            0,
+        );
+        rename_terminal.process(&rename_output);
+        if !std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
+            let search_cell = search_terminal.screen().cell(0, 0).unwrap();
+            assert_eq!(search_cell.fgcolor(), VtColor::Rgb(7, 8, 9));
+            assert_eq!(search_cell.bgcolor(), VtColor::Rgb(10, 11, 12));
+            let rename_cell = rename_terminal.screen().cell(0, 0).unwrap();
+            assert_eq!(rename_cell.fgcolor(), VtColor::Rgb(1, 2, 3));
+            assert_eq!(rename_cell.bgcolor(), VtColor::Rgb(4, 5, 6));
+        }
+        let mut fallback_config = config.clone();
+        fallback_config.vim_colors.search_prompt_foreground = None;
+        fallback_config.vim_colors.search_prompt_background = None;
+        let mut fallback_output = Vec::new();
+        draw_search_prompt_line(
+            &mut fallback_output,
+            "/needle",
+            10,
+            &fallback_config,
+            ResolvedVimColors::new(&fallback_config),
+        )
+        .unwrap();
+        let mut fallback_terminal = Parser::new(
+            std::num::NonZeroU16::new(3).unwrap(),
+            std::num::NonZeroU16::new(10).unwrap(),
+            0,
+        );
+        fallback_terminal.process(&fallback_output);
+        let fallback_search_cell = fallback_terminal.screen().cell(0, 0).unwrap();
+        if !std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
+            assert_eq!(fallback_search_cell.fgcolor(), VtColor::Rgb(1, 2, 3));
+            assert_eq!(fallback_search_cell.bgcolor(), VtColor::Rgb(4, 5, 6));
+        }
     }
     #[test]
     fn yank_flash_history_view_keeps_live_bracketed_paste_enabled() {
@@ -1852,7 +2379,12 @@ mod tests {
         let prior = RenderedPane {
             window: 1,
             buffer: 1,
-            rect: PaneRect { x: 0, y: 0, width: 4, height: 1 },
+            rect: PaneRect {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 1,
+            },
             origin,
             terminal: (4, 3),
             cells: rendered_cells(parser.screen(), origin),
@@ -1905,7 +2437,11 @@ mod tests {
         let mut output = Vec::new();
         renderer.draw(&mut output, 80, 24).unwrap();
         assert!(output.windows(1).any(|bytes| bytes == b"x"));
-        assert!(output.len() < 500, "incremental draw wrote {} bytes", output.len());
+        assert!(
+            output.len() < 500,
+            "incremental draw wrote {} bytes",
+            output.len()
+        );
     }
     #[test]
     fn split_views_diff_duplicates_and_layout_change_invalidates_cache() {

@@ -12,6 +12,21 @@ pub(crate) struct Config {
     pub divider: DividerStyle,
     pub margin: MarginStyle,
     pub resize: Resize,
+    pub vim_colors: VimColors,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct VimColors {
+    pub search_prompt_foreground: Option<String>,
+    pub search_prompt_background: Option<String>,
+    pub search_match_foreground: String,
+    pub search_match_background: String,
+    pub search_current_foreground: String,
+    pub search_current_background: String,
+    pub selection_foreground: String,
+    pub selection_background: String,
+    pub yank_foreground: String,
+    pub yank_background: String,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -102,6 +117,23 @@ impl Default for Config {
             divider: DividerStyle::default(),
             margin: MarginStyle::default(),
             resize: Resize::default(),
+            vim_colors: VimColors::default(),
+        }
+    }
+}
+impl Default for VimColors {
+    fn default() -> Self {
+        Self {
+            search_prompt_foreground: None,
+            search_prompt_background: None,
+            search_match_foreground: "#1a1b26".into(),
+            search_match_background: "#7aa2f7".into(),
+            search_current_foreground: "#1a1b26".into(),
+            search_current_background: "#ff9e64".into(),
+            selection_foreground: "#c0caf5".into(),
+            selection_background: "#283457".into(),
+            yank_foreground: "#1a1b26".into(),
+            yank_background: "#ff9e64".into(),
         }
     }
 }
@@ -216,6 +248,38 @@ impl Config {
             ("divider.foreground", &self.divider.foreground),
             ("margin.foreground", &self.margin.foreground),
             ("margin.background", &self.margin.background),
+            (
+                "vim_colors.search_match_foreground",
+                &self.vim_colors.search_match_foreground,
+            ),
+            (
+                "vim_colors.search_match_background",
+                &self.vim_colors.search_match_background,
+            ),
+            (
+                "vim_colors.search_current_foreground",
+                &self.vim_colors.search_current_foreground,
+            ),
+            (
+                "vim_colors.search_current_background",
+                &self.vim_colors.search_current_background,
+            ),
+            (
+                "vim_colors.selection_foreground",
+                &self.vim_colors.selection_foreground,
+            ),
+            (
+                "vim_colors.selection_background",
+                &self.vim_colors.selection_background,
+            ),
+            (
+                "vim_colors.yank_foreground",
+                &self.vim_colors.yank_foreground,
+            ),
+            (
+                "vim_colors.yank_background",
+                &self.vim_colors.yank_background,
+            ),
         ] {
             if parse_color(value).is_none() {
                 return Err(invalid(format!("{field} has unknown color {value:?}")));
@@ -229,6 +293,14 @@ impl Config {
             (
                 "buffer_line.rename_background",
                 &self.buffer_line.rename_background,
+            ),
+            (
+                "vim_colors.search_prompt_foreground",
+                &self.vim_colors.search_prompt_foreground,
+            ),
+            (
+                "vim_colors.search_prompt_background",
+                &self.vim_colors.search_prompt_background,
             ),
             (
                 "buffer_line.focused_prefix_foreground",
@@ -327,13 +399,56 @@ impl Config {
         let mut bindings = Config::default().bindings;
         bindings.extend(self.bindings.clone());
         let mut sequences: Vec<(String, Vec<u8>)> = Vec::new();
+        let contexts_overlap =
+            |left: &str, left_sequence: &[u8], right: &str, right_sequence: &[u8]| {
+                if left.starts_with("vim_") && right.starts_with("vim_") {
+                    let includes = |action: &str, sequence: &[u8], context| {
+                        crate::input::action_contexts(action).contains(&context)
+                            || action == "vim_normal"
+                                && match context {
+                                    crate::input::InputContext::Search => {
+                                        sequence == b"\x1b" || !sequence.starts_with(b"\x1b")
+                                    }
+                                    crate::input::InputContext::Insert => {
+                                        !self.bindings.contains_key("vim_insert_normal")
+                                    }
+                                    _ => false,
+                                }
+                    };
+                    [
+                        crate::input::InputContext::Insert,
+                        crate::input::InputContext::Normal,
+                        crate::input::InputContext::Visual,
+                        crate::input::InputContext::Operator,
+                        crate::input::InputContext::Search,
+                    ]
+                    .into_iter()
+                    .any(|context| {
+                        includes(left, left_sequence, context)
+                            && includes(right, right_sequence, context)
+                    })
+                } else {
+                    true
+                }
+            };
         for (action, key) in &bindings {
             if !ACTIONS.contains(&action.as_str()) {
                 return Err(invalid(format!("unknown binding action {action:?}")));
             }
-            let sequence = parse_key(key).ok_or_else(|| invalid(format!("bindings.{action} has invalid key {key:?}; use esc, ctrl+KEY, ctrl+shift+KEY, alt+KEY, alt+shift+KEY, alt+ctrl+KEY, or a plain ASCII character")))?;
+            let sequence = parse_key(key).ok_or_else(|| invalid(format!("bindings.{action} has invalid key {key:?}; use esc, alt+esc, ctrl+KEY, ctrl+shift+KEY, alt+KEY, alt+shift+KEY, alt+ctrl+KEY, a named terminal key, or a plain ASCII character")))?;
+            if matches!(
+                action.as_str(),
+                "vim_search_accept" | "vim_search_cancel" | "vim_search_backspace"
+            ) && sequence.len() == 1
+                && (0x20..=0x7e).contains(&sequence[0])
+            {
+                return Err(invalid(format!(
+                    "bindings.{action} must not be a printable key in search mode"
+                )));
+            }
             if sequences.iter().any(|(other_action, other)| {
                 other == &sequence
+                    && contexts_overlap(action, &sequence, other_action, other)
                     && !(action.starts_with("vim_")
                         && self.bindings.contains_key(action)
                         && !self.bindings.contains_key(other_action))
@@ -351,7 +466,9 @@ impl Config {
             for (other, other_sequence) in sequences.iter().skip(i + 1) {
                 let escape_prefix = (sequence == b"\x1b" && other_sequence.starts_with(b"\x1b"))
                     || (other_sequence == b"\x1b" && sequence.starts_with(b"\x1b"));
-                if (sequence.starts_with(other_sequence) || other_sequence.starts_with(sequence))
+                if contexts_overlap(action, sequence, other, other_sequence)
+                    && (sequence.starts_with(other_sequence)
+                        || other_sequence.starts_with(sequence))
                     && !escape_prefix
                 {
                     return Err(invalid(format!(
@@ -429,6 +546,17 @@ const ACTIONS: &[&str] = &[
     "vim_match_backward",
     "vim_match_next",
     "vim_match_previous",
+    "vim_visual_swap",
+    "vim_visual_cycle",
+    "vim_search_accept",
+    "vim_search_cancel",
+    "vim_insert_normal",
+    "vim_search_control",
+    "vim_document_line_start",
+    "vim_document_line_end",
+    "vim_search_backspace",
+    "vim_yank_around",
+    "vim_yank_inner",
 ];
 
 pub(crate) fn parse_color(name: &str) -> Option<crossterm::style::Color> {
@@ -469,6 +597,9 @@ pub(crate) fn parse_key(key: &str) -> Option<Vec<u8>> {
     if matches!(key, "esc" | "escape") {
         return Some(vec![0x1b]);
     }
+    if matches!(key, "alt+esc" | "alt+escape") {
+        return Some(vec![0x1b, 0x1b]);
+    }
     let (modifiers, character) = if let Some(character) = key.strip_prefix("ctrl+shift+") {
         ("ctrl+shift", character)
     } else if let Some(character) = key.strip_prefix("alt+ctrl+") {
@@ -482,6 +613,25 @@ pub(crate) fn parse_key(key: &str) -> Option<Vec<u8>> {
     } else {
         ("", key)
     };
+    let named = match character.to_ascii_lowercase().as_str() {
+        "enter" | "return" => Some(b"\r".to_vec()),
+        "backspace" | "bs" => Some(vec![0x7f]),
+        "tab" => Some(b"\t".to_vec()),
+        "space" => Some(b" ".to_vec()),
+        "pageup" | "page_up" | "page-up" => Some(b"\x1b[5~".to_vec()),
+        "pagedown" | "page_down" | "page-down" => Some(b"\x1b[6~".to_vec()),
+        "up" | "arrowup" | "arrow_up" | "arrow-up" => Some(b"\x1b[A".to_vec()),
+        "down" | "arrowdown" | "arrow_down" | "arrow-down" => Some(b"\x1b[B".to_vec()),
+        "right" | "arrowright" | "arrow_right" | "arrow-right" => Some(b"\x1b[C".to_vec()),
+        "left" | "arrowleft" | "arrow_left" | "arrow-left" => Some(b"\x1b[D".to_vec()),
+        "home" => Some(b"\x1b[H".to_vec()),
+        "end" => Some(b"\x1b[F".to_vec()),
+        "delete" | "del" => Some(b"\x1b[3~".to_vec()),
+        _ => None,
+    };
+    if let Some(sequence) = named {
+        return modifiers.is_empty().then_some(sequence);
+    }
     if character.len() != 1 || !character.as_bytes()[0].is_ascii() {
         return None;
     }
@@ -597,6 +747,50 @@ mod tests {
     }
 
     #[test]
+    fn vim_colors_have_tokyo_night_defaults_and_optional_prompt_overrides() {
+        let defaults = Config::default().vim_colors;
+        assert_eq!(defaults.search_prompt_foreground, None);
+        assert_eq!(defaults.search_prompt_background, None);
+        assert_eq!(defaults.search_match_foreground, "#1a1b26");
+        assert_eq!(defaults.search_match_background, "#7aa2f7");
+        assert_eq!(defaults.search_current_background, "#ff9e64");
+        assert_eq!(defaults.selection_background, "#283457");
+        assert_eq!(defaults.yank_background, "#ff9e64");
+
+        let config: Config = toml::from_str(
+            "[vim_colors]\nsearch_prompt_foreground = \"cyan\"\nsearch_prompt_background = \"#010203\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.vim_colors.search_prompt_foreground.as_deref(),
+            Some("cyan")
+        );
+        assert_eq!(
+            config.vim_colors.search_prompt_background.as_deref(),
+            Some("#010203")
+        );
+        config.validate(&PathBuf::from("test.toml")).unwrap();
+    }
+
+    #[test]
+    fn vim_colors_validate_color_values_and_reject_unknown_fields() {
+        for config in [
+            toml::from_str::<Config>("[vim_colors]\nsearch_match_foreground = \"not-a-color\"\n")
+                .unwrap(),
+            toml::from_str::<Config>("[vim_colors]\nsearch_prompt_background = \"not-a-color\"\n")
+                .unwrap(),
+        ] {
+            assert!(
+                config
+                    .validate(&PathBuf::from("test.toml"))
+                    .unwrap_err()
+                    .contains("vim_colors.")
+            );
+        }
+        assert!(toml::from_str::<Config>("[vim_colors]\nunknown = \"red\"\n").is_err());
+    }
+
+    #[test]
     fn invalid_overrides_report_specific_config_values() {
         let mut config = Config::default();
         config.bindings.insert("new_buffer".into(), "ctrl+g".into());
@@ -651,6 +845,30 @@ mod tests {
         assert_eq!(parse_key("alt++").unwrap(), b"\x1b+");
         assert_eq!(parse_key("alt+shift++").unwrap(), b"\x1b+");
     }
+
+    #[test]
+    fn named_terminal_keys_encode_expected_sequences() {
+        for (key, expected) in [
+            ("enter", b"\r".as_slice()),
+            ("backspace", b"\x7f".as_slice()),
+            ("tab", b"\t".as_slice()),
+            ("space", b" ".as_slice()),
+            ("pageup", b"\x1b[5~".as_slice()),
+            ("pagedown", b"\x1b[6~".as_slice()),
+            ("up", b"\x1b[A".as_slice()),
+            ("arrow_down", b"\x1b[B".as_slice()),
+            ("right", b"\x1b[C".as_slice()),
+            ("arrow-left", b"\x1b[D".as_slice()),
+            ("home", b"\x1b[H".as_slice()),
+            ("end", b"\x1b[F".as_slice()),
+            ("delete", b"\x1b[3~".as_slice()),
+            ("alt+esc", b"\x1b\x1b".as_slice()),
+        ] {
+            assert_eq!(parse_key(key).unwrap(), expected, "{key}");
+        }
+        assert_eq!(parse_key("alt+escape").unwrap(), b"\x1b\x1b");
+        assert_eq!(parse_key("ctrl+enter"), None);
+    }
     #[test]
     fn unsafe_color_text_and_literal_key_case_are_handled_safely() {
         assert!(parse_color("#ééééé").is_none());
@@ -673,6 +891,58 @@ mod tests {
         assert_eq!(parse_key("alt+ctrl+[").unwrap(), b"\x1b\x1b");
         assert_eq!(parse_key("alt+shift+q").unwrap(), b"\x1bQ");
         assert_eq!(parse_key("ctrl+shift+h").unwrap(), b"\x1b[104;6u");
+    }
+
+    #[test]
+    fn search_edit_bindings_reject_printable_query_characters() {
+        for action in [
+            "vim_search_accept",
+            "vim_search_cancel",
+            "vim_search_backspace",
+        ] {
+            let mut config = Config::default();
+            config.bindings.insert(action.into(), "x".into());
+            assert!(
+                config
+                    .validate(&PathBuf::from("test.toml"))
+                    .unwrap_err()
+                    .contains("printable")
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_vim_normal_collision_checks_its_insert_context() {
+        let mut config = Config::default();
+        config.bindings.insert("vim_normal".into(), "ctrl+q".into());
+        config
+            .bindings
+            .insert("vim_insert_search".into(), "ctrl+q".into());
+        assert!(config.validate(&PathBuf::from("test.toml")).is_err());
+        config
+            .bindings
+            .insert("vim_insert_normal".into(), "alt+esc".into());
+        assert!(config.validate(&PathBuf::from("test.toml")).is_ok());
+    }
+    #[test]
+    fn normal_binding_validation_respects_escape_prefixed_search_scope() {
+        let mut config = Config::default();
+        config.bindings.extend([
+            ("vim_normal".into(), "alt+q".into()),
+            ("vim_search_cancel".into(), "alt+q".into()),
+        ]);
+        assert!(config.validate(&PathBuf::from("test.toml")).is_ok());
+
+        config.bindings.insert("vim_normal".into(), "esc".into());
+        config
+            .bindings
+            .insert("vim_search_cancel".into(), "esc".into());
+        assert!(
+            config
+                .validate(&PathBuf::from("test.toml"))
+                .unwrap_err()
+                .contains("duplicates")
+        );
     }
 
     #[test]

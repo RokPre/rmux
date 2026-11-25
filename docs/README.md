@@ -101,6 +101,11 @@ All configurable Vim actions and their default keys are:
 | `vim_view_cursor_top`, `vim_view_cursor_bottom` | `K`, `J` (scroll up / down) |
 | `vim_scroll_half_down`, `vim_scroll_half_up` | `Ctrl-d`, `Ctrl-u` |
 | `vim_scroll_page_down`, `vim_scroll_page_up` | Page Down, `Ctrl-b` |
+| `vim_document_line_start`, `vim_document_line_end` | `gh`, `gl` |
+| `vim_visual_swap`, `vim_visual_cycle` | `o`, `t` in Visual |
+| `vim_yank_inner`, `vim_yank_around` | `i`, `a` after `y` |
+| `vim_insert_normal`, `vim_search_control` | `Alt-Escape`, `Ctrl-f` in Normal / Visual |
+| `vim_search_accept`, `vim_search_cancel`, `vim_search_backspace` | Enter, Escape, Backspace in Search |
 | `vim_insert_search`, `vim_search`, `vim_search_backward` | `Ctrl-f` in Insert, `/`, `?` |
 | `vim_next_match`, `vim_match_next` | `n` |
 | `vim_previous_match`, `vim_match_previous` | `N` |
@@ -109,7 +114,9 @@ All configurable Vim actions and their default keys are:
 | `vim_yank`, `vim_insert`, `vim_normal` | `y`, `i`, `Escape` |
 | `vim_scroll_insert_down`, `vim_scroll_insert_up` | `Alt-d`, `Alt-f` |
 
-`vim_match_next` / `vim_match_previous` are alternate action names for `vim_next_match` / `vim_previous_match`. Vim action bindings are context-sensitive. A configured binding replaces the corresponding default in its applicable modes; other actions retain their defaults. `vim_normal` is an exception: its configured key is added while `Alt-Escape` and `Escape` remain available.
+Vim bindings are context-sensitive, so the same key may be assigned to actions whose modes do not overlap. The configured `vim_normal` also applies in Insert unless `vim_insert_normal` is explicitly configured. Search editing bindings must be control or named keys, not printable characters, which remain query text. Counts and text-object selectors such as `w`, `(` and `"` after `yi` / `ya` remain literal Vim grammar. Named keys include `enter`, `escape`, `backspace`, `tab`, `space`, `pageup`, `pagedown`, arrows, `home`, `end`, `delete`, and `alt+esc`.
+
+In `[vim_colors]`, foreground and background can be set independently for the search prompt, ordinary and current search matches, Visual selection, and yank flash. Search prompt colors fall back to the rename prompt colors when omitted.
 
 For a Neovim buffer to temporarily pass its own keys through to Neovim instead of treating Vim-mode keys as rmux commands, install the provided `contrib/rmux.nvim.lua` as `~/.config/nvim/lua/rmux.lua` (or another module on `runtimepath`) and load it from `init.lua`:
 
@@ -151,6 +158,18 @@ focused_prefix_foreground = "cyan" # optional; marker-specific overrides
 shown_suffix_background = "#202030"
 marker_color = false
 background = "dark_grey" # also fills unused cells to the right
+
+[vim_colors]
+search_prompt_foreground = "#c0caf5"
+search_prompt_background = "#1a1b26"
+search_match_foreground = "#1a1b26"
+search_match_background = "#7aa2f7"
+search_current_foreground = "#1a1b26"
+search_current_background = "#ff9e64"
+selection_foreground = "#c0caf5"
+selection_background = "#283457"
+yank_foreground = "#1a1b26"
+yank_background = "#ff9e64"
 
 [divider]
 foreground = "dark_grey"

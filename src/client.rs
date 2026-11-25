@@ -1,7 +1,7 @@
-use std::process::{Command, Stdio};
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -11,8 +11,8 @@ use crate::input::{InputAction, InputDecoder};
 use crate::render::{BUFFER_OUTPUT, BUFFER_SNAPSHOT, Renderer, VIM_STATE};
 use crate::runtime::{SessionPaths, read_response, write_request};
 use crate::server::{
-    CLOSE, HISTORY_SNAPSHOT, HISTORY_VIEW, INPUT, RENAME_BUFFER, RESIZE, VIM_FLUSH, VIM_KEY,
-    WINDOW_STATE, YANK, read_frame, write_frame,
+    CLOSE, HISTORY_SNAPSHOT, HISTORY_VIEW, INPUT, INPUT_ACK, INPUT_SYNC, RENAME_BUFFER, RESIZE,
+    VIM_FLUSH_SYNC, VIM_KEY, VIM_KEY_SYNC, WINDOW_STATE, YANK, read_frame, write_frame,
 };
 
 const PROMPT_ESCAPE_TIMEOUT: Duration = Duration::from_millis(40);
@@ -66,6 +66,35 @@ struct RenamePrompt {
     pending_utf8: Vec<u8>,
 }
 
+#[derive(Default)]
+struct InputSequence {
+    sent: u64,
+    acknowledged: u64,
+}
+
+impl InputSequence {
+    fn send(&mut self, server: &mut UnixStream, kind: u8, bytes: &[u8]) -> io::Result<()> {
+        let sequence = self
+            .sent
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("input sequence exhausted"))?;
+        let mut payload = Vec::with_capacity(8 + bytes.len());
+        payload.extend_from_slice(&sequence.to_be_bytes());
+        payload.extend_from_slice(bytes);
+        write_frame(server, kind, &payload)?;
+        self.sent = sequence;
+        Ok(())
+    }
+
+    fn acknowledge(&mut self, sequence: u64) {
+        self.acknowledged = self.acknowledged.max(sequence.min(self.sent));
+    }
+
+    fn settled(&self) -> bool {
+        self.acknowledged == self.sent
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PromptResult {
     Editing,
@@ -105,7 +134,10 @@ impl RenamePrompt {
                     }
                     self.pending_escape.clear();
                     self.escape_started = None;
-                } else if !PROMPT_KEYS.iter().any(|key| key.starts_with(&self.pending_escape)) {
+                } else if !PROMPT_KEYS
+                    .iter()
+                    .any(|key| key.starts_with(&self.pending_escape))
+                {
                     return (PromptResult::Cancel, bytes.len());
                 }
                 continue;
@@ -206,11 +238,14 @@ pub(crate) fn attach(
         return Err(io::Error::other(response.error));
     }
     ensure_vim_protocol(response.supports_vim_protocol)?;
+    ensure_input_ack_support(response.supports_input_ack)?;
     ensure_resize_support(config.resize.step_percent, response.supports_resize_step)?;
 
     let _raw_mode = RawMode::enable()?;
     let _terminal_screen = TerminalScreen::enter()?;
-    crate::debug_log(format_args!("client connected session={name} size={cols}x{rows}"));
+    crate::debug_log(format_args!(
+        "client connected session={name} size={cols}x{rows}"
+    ));
     writer.set_read_timeout(None)?;
     writer.set_write_timeout(None)?;
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -235,6 +270,7 @@ pub(crate) fn attach(
     let mut input_decoder = InputDecoder::configured(&config);
     let mut rename_prompt = None;
     let mut vim_escape_started = None;
+    let mut input_sequence = InputSequence::default();
 
     loop {
         if interrupted.load(Ordering::Acquire) {
@@ -243,7 +279,9 @@ pub(crate) fn attach(
             break;
         }
         if rename_prompt.as_ref().is_some_and(|prompt: &RenamePrompt| {
-            prompt.escape_started.is_some_and(|started| started.elapsed() >= PROMPT_ESCAPE_TIMEOUT)
+            prompt
+                .escape_started
+                .is_some_and(|started| started.elapsed() >= PROMPT_ESCAPE_TIMEOUT)
         }) {
             rename_prompt = None;
             renderer.set_prompt(None);
@@ -259,6 +297,7 @@ pub(crate) fn attach(
                 &mut rename_prompt,
                 &mut output,
                 last_size,
+                &mut input_sequence,
                 action,
             )?;
             if !keep_escape_timeout {
@@ -268,19 +307,30 @@ pub(crate) fn attach(
         if vim_escape_started
             .is_some_and(|started: Instant| started.elapsed() >= PROMPT_ESCAPE_TIMEOUT)
         {
-            write_frame(&mut writer, VIM_FLUSH, &[])?;
+            input_sequence.send(&mut writer, VIM_FLUSH_SYNC, &[])?;
             vim_escape_started = None;
         }
         let now = Instant::now();
-        let mut timeout = input_decoder.remaining_timeout(now).unwrap_or(Duration::from_millis(100));
-        if let Some(started) = rename_prompt.as_ref().and_then(|prompt| prompt.escape_started) {
-            timeout = timeout.min(PROMPT_ESCAPE_TIMEOUT.saturating_sub(now.duration_since(started)));
+        let mut timeout = input_decoder
+            .remaining_timeout(now)
+            .unwrap_or(Duration::from_millis(100));
+        if let Some(started) = rename_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.escape_started)
+        {
+            timeout =
+                timeout.min(PROMPT_ESCAPE_TIMEOUT.saturating_sub(now.duration_since(started)));
         }
         if let Some(started) = vim_escape_started {
-            timeout = timeout.min(PROMPT_ESCAPE_TIMEOUT.saturating_sub(now.duration_since(started)));
+            timeout =
+                timeout.min(PROMPT_ESCAPE_TIMEOUT.saturating_sub(now.duration_since(started)));
         }
         let server_data_buffered = !reader.buffer().is_empty();
-        let timeout = if server_data_buffered { 0 } else { timeout.as_millis().clamp(1, 100) as i32 };
+        let timeout = if server_data_buffered {
+            0
+        } else {
+            timeout.as_millis().clamp(1, 100) as i32
+        };
         let mut descriptors = [
             libc::pollfd {
                 fd: stdin_fd,
@@ -317,11 +367,12 @@ pub(crate) fn attach(
                 &mut rename_prompt,
                 &mut output,
                 last_size,
+                &mut input_sequence,
                 &input_buffer[..length],
             )?;
             let raw_input = &input_buffer[..length];
-            vim_escape_started =
-                ends_with_unpaired_escape(raw_input, vim_escape_started.is_some()).then(Instant::now);
+            vim_escape_started = ends_with_unpaired_escape(raw_input, vim_escape_started.is_some())
+                .then(Instant::now);
         }
         if descriptors[1].revents & libc::POLLIN != 0 || !reader.buffer().is_empty() {
             match read_frame(&mut reader)? {
@@ -338,6 +389,10 @@ pub(crate) fn attach(
                     renderer.draw(&mut output, last_size.0, last_size.1)?;
                 }
                 Some((YANK, bytes)) => report_yank(&bytes, &mut output, last_size),
+                Some((INPUT_ACK, bytes)) if bytes.len() == 8 => {
+                    let sequence = u64::from_be_bytes(bytes[..8].try_into().unwrap());
+                    input_sequence.acknowledge(sequence);
+                }
                 Some((VIM_STATE, bytes)) => {
                     renderer.apply_frame(VIM_STATE, &bytes)?;
                     renderer.draw(&mut output, last_size.0, last_size.1)?;
@@ -360,7 +415,9 @@ pub(crate) fn attach(
                     break;
                 }
                 None => {
-                    crate::debug_log(format_args!("client server connection closed session={name}"));
+                    crate::debug_log(format_args!(
+                        "client server connection closed session={name}"
+                    ));
                     break;
                 }
                 Some(_) => {
@@ -372,7 +429,10 @@ pub(crate) fn attach(
             }
         }
         if descriptors[1].revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
-            crate::debug_log(format_args!("client server poll closed session={name} revents={}", descriptors[1].revents));
+            crate::debug_log(format_args!(
+                "client server poll closed session={name} revents={}",
+                descriptors[1].revents
+            ));
             break;
         }
 
@@ -380,7 +440,10 @@ pub(crate) fn attach(
             last_resize_check = Instant::now();
             let size = terminal_size();
             if size != last_size {
-                crate::debug_log(format_args!("client terminal resize session={name} size={}x{}", size.0, size.1));
+                crate::debug_log(format_args!(
+                    "client terminal resize session={name} size={}x{}",
+                    size.0, size.1
+                ));
                 let mut payload = Vec::with_capacity(4);
                 payload.extend_from_slice(&size.1.max(1).to_be_bytes());
                 payload.extend_from_slice(&size.0.max(1).to_be_bytes());
@@ -413,6 +476,48 @@ fn ensure_vim_protocol(supported: bool) -> io::Result<()> {
     Ok(())
 }
 
+fn ensure_input_ack_support(supported: bool) -> io::Result<()> {
+    if !supported {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "session server does not support sequenced input acknowledgements; exit this session and restart it with the current rmux before attaching",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod input_ack_tests {
+    use super::*;
+
+    #[test]
+    fn server_must_support_sequenced_input_acknowledgements() {
+        let error = ensure_input_ack_support(false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            error
+                .to_string()
+                .contains("sequenced input acknowledgements")
+        );
+        ensure_input_ack_support(true).unwrap();
+    }
+
+    #[test]
+    fn pending_local_input_defers_operator_snapshot_sync_until_acknowledged() {
+        let mut input = InputSequence {
+            sent: 2,
+            acknowledged: 0,
+        };
+        assert!(!input.settled());
+        input.acknowledge(1);
+        assert!(!input.settled());
+        input.acknowledge(2);
+        assert!(input.settled());
+        input.acknowledge(9);
+        assert!(input.settled());
+    }
+}
+
 fn ends_with_unpaired_escape(bytes: &[u8], previous_pending: bool) -> bool {
     let trailing = bytes.iter().rev().take_while(|&&byte| byte == 0x1b).count();
     let previous = if previous_pending && bytes.iter().all(|&byte| byte == 0x1b) {
@@ -430,6 +535,7 @@ fn send_input(
     rename_prompt: &mut Option<RenamePrompt>,
     output: &mut impl io::Write,
     size: (u16, u16),
+    input_sequence: &mut InputSequence,
     bytes: &[u8],
 ) -> io::Result<()> {
     if rename_prompt.is_some() {
@@ -440,12 +546,25 @@ fn send_input(
             rename_prompt,
             output,
             size,
+            input_sequence,
             bytes,
         );
     }
+    if input_sequence.settled() {
+        if let Some((operator_pending, count_started)) = renderer.take_operator_pending() {
+            decoder.sync_operator(operator_pending.as_deref(), count_started);
+        }
+    }
     let context = renderer.input_context();
     if !decoder.should_decode_with_context(bytes, context) {
-        return write_frame(server, INPUT, bytes);
+        return if matches!(
+            context,
+            crate::input::InputContext::Normal | crate::input::InputContext::Visual
+        ) {
+            input_sequence.send(server, INPUT_SYNC, bytes)
+        } else {
+            write_frame(server, INPUT, bytes)
+        };
     }
     let actions = decoder.feed_with_context(bytes, context);
     for action in actions {
@@ -456,6 +575,7 @@ fn send_input(
             rename_prompt,
             output,
             size,
+            input_sequence,
             action,
         )?;
     }
@@ -469,6 +589,7 @@ fn handle_input_action(
     rename_prompt: &mut Option<RenamePrompt>,
     output: &mut impl io::Write,
     size: (u16, u16),
+    input_sequence: &mut InputSequence,
     action: InputAction,
 ) -> io::Result<()> {
     if rename_prompt.is_some() {
@@ -480,13 +601,23 @@ fn handle_input_action(
                 rename_prompt,
                 output,
                 size,
+                input_sequence,
                 &bytes,
             ),
             InputAction::Command(_) => Ok(()),
         };
     }
     match action {
-        InputAction::Bytes(bytes) => write_frame(server, INPUT, &bytes),
+        InputAction::Bytes(bytes) => {
+            if matches!(
+                renderer.input_context(),
+                crate::input::InputContext::Normal | crate::input::InputContext::Visual
+            ) {
+                input_sequence.send(server, INPUT_SYNC, &bytes)
+            } else {
+                write_frame(server, INPUT, &bytes)
+            }
+        }
         InputAction::Command(command)
             if command.kind == RENAME_BUFFER && command.payload.is_empty() =>
         {
@@ -499,13 +630,14 @@ fn handle_input_action(
             }
             Ok(())
         }
-        InputAction::Command(command) => {
-            write_frame(server, command.kind, command.payload)?;
-            if command.kind == VIM_KEY && command.payload == b"\x1b" {
-                write_frame(server, VIM_FLUSH, &[])?;
+        InputAction::Command(command) if command.kind == VIM_KEY => {
+            input_sequence.send(server, VIM_KEY_SYNC, command.payload)?;
+            if command.payload == b"\x1b" {
+                input_sequence.send(server, VIM_FLUSH_SYNC, &[])?;
             }
             Ok(())
         }
+        InputAction::Command(command) => write_frame(server, command.kind, command.payload),
     }
 }
 #[cfg(test)]
@@ -517,7 +649,11 @@ mod handshake_tests {
     fn refuses_servers_without_vim_protocol_support() {
         let error = ensure_vim_protocol(false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-        assert!(error.to_string().contains("exit this session and restart it"));
+        assert!(
+            error
+                .to_string()
+                .contains("exit this session and restart it")
+        );
     }
 
     #[test]
@@ -528,7 +664,7 @@ mod handshake_tests {
     #[test]
     fn response_and_initial_frame_in_one_write_are_both_read() {
         let (mut sender, receiver) = UnixStream::pair().unwrap();
-        let mut payload = b"{\"ok\":true,\"name\":\"test\",\"supports_resize_step\":true}\n".to_vec();
+        let mut payload = b"{\"ok\":true,\"name\":\"test\",\"supports_resize_step\":true,\"supports_input_ack\":true}\n".to_vec();
         payload.extend_from_slice(&[BUFFER_SNAPSHOT, 0, 0, 0, 12]);
         payload.extend_from_slice(&1u64.to_be_bytes());
         payload.extend_from_slice(&24u16.to_be_bytes());
@@ -555,6 +691,7 @@ fn handle_prompt_input(
     rename_prompt: &mut Option<RenamePrompt>,
     output: &mut impl io::Write,
     size: (u16, u16),
+    input_sequence: &mut InputSequence,
     bytes: &[u8],
 ) -> io::Result<()> {
     let Some(prompt) = rename_prompt.as_mut() else {
@@ -565,6 +702,7 @@ fn handle_prompt_input(
             rename_prompt,
             output,
             size,
+            input_sequence,
             bytes,
         );
     };
@@ -593,6 +731,7 @@ fn handle_prompt_input(
                     rename_prompt,
                     output,
                     size,
+                    input_sequence,
                     &bytes[consumed..],
                 )?;
             }
@@ -624,6 +763,152 @@ mod tests {
         renderer
     }
 
+    #[test]
+    fn intermediate_self_snapshot_cannot_roll_back_same_read_inner_selector() {
+        let mut config = crate::config::Config::default();
+        config.bindings.insert("vim_yank_inner".into(), "x".into());
+        config
+            .bindings
+            .insert("vim_word_forward".into(), "z".into());
+        let mut renderer = Renderer::with_config(config.clone());
+        renderer.set_layout(LayoutSnapshot {
+            tree: WindowNode::Window { id: 1, buffer: 7 },
+            focused_window: 1,
+            active_buffer: Some(7),
+            buffers: vec![7],
+            buffer_names: std::collections::HashMap::new(),
+        });
+        let initial_state = serde_json::json!({
+            "buffer": 7,
+            "mode": "normal",
+            "cursor_row": 0,
+            "cursor_col": 0,
+            "selection": null,
+            "matches": [],
+            "active_match": null,
+            "prompt": null,
+            "app_control": false,
+            "history_len": 0,
+            "scrollback": 0
+        });
+        renderer
+            .apply_frame(VIM_STATE, &serde_json::to_vec(&initial_state).unwrap())
+            .unwrap();
+        let mut decoder = InputDecoder::configured(&config);
+        let mut input_sequence = InputSequence::default();
+        let mut prompt = None;
+        let mut output = Vec::new();
+        let (mut client, mut peer) = UnixStream::pair().unwrap();
+
+        send_input(
+            &mut client,
+            &mut decoder,
+            &mut renderer,
+            &mut prompt,
+            &mut output,
+            (20, 3),
+            &mut input_sequence,
+            b"yx",
+        )
+        .unwrap();
+        let mut y = 1u64.to_be_bytes().to_vec();
+        y.push(b'y');
+        let mut inner = 2u64.to_be_bytes().to_vec();
+        inner.push(b'i');
+        assert_eq!(
+            crate::server::read_frame(&mut peer).unwrap(),
+            Some((INPUT_SYNC, y))
+        );
+        assert_eq!(
+            crate::server::read_frame(&mut peer).unwrap(),
+            Some((VIM_KEY_SYNC, inner))
+        );
+
+        let intermediate_state = serde_json::json!({
+            "buffer": 7,
+            "mode": "normal",
+            "cursor_row": 0,
+            "cursor_col": 0,
+            "selection": null,
+            "matches": [],
+            "active_match": null,
+            "prompt": null,
+            "app_control": false,
+            "history_len": 0,
+            "scrollback": 0,
+            "operator_pending": "y"
+        });
+        renderer
+            .apply_frame(VIM_STATE, &serde_json::to_vec(&intermediate_state).unwrap())
+            .unwrap();
+        input_sequence.acknowledge(1);
+        assert!(!input_sequence.settled());
+
+        send_input(
+            &mut client,
+            &mut decoder,
+            &mut renderer,
+            &mut prompt,
+            &mut output,
+            (20, 3),
+            &mut input_sequence,
+            b"w",
+        )
+        .unwrap();
+        let mut selector = 3u64.to_be_bytes().to_vec();
+        selector.push(b'w');
+        assert_eq!(
+            crate::server::read_frame(&mut peer).unwrap(),
+            Some((INPUT_SYNC, selector))
+        );
+        assert_eq!(
+            renderer.take_operator_pending(),
+            Some((Some("y".into()), false))
+        );
+    }
+
+    #[test]
+    fn insert_passthrough_does_not_wait_for_input_acknowledgements() {
+        let mut renderer = renderer_with_buffer();
+        let state = serde_json::json!({
+            "buffer": 7,
+            "mode": "insert",
+            "cursor_row": 0,
+            "cursor_col": 0,
+            "selection": null,
+            "matches": [],
+            "active_match": null,
+            "prompt": null,
+            "app_control": false,
+            "history_len": 0,
+            "scrollback": 0
+        });
+        renderer
+            .apply_frame(VIM_STATE, &serde_json::to_vec(&state).unwrap())
+            .unwrap();
+        let mut decoder = InputDecoder::default();
+        let mut input_sequence = InputSequence::default();
+        let mut prompt = None;
+        let mut output = Vec::new();
+        let (mut client, mut peer) = UnixStream::pair().unwrap();
+        send_input(
+            &mut client,
+            &mut decoder,
+            &mut renderer,
+            &mut prompt,
+            &mut output,
+            (20, 3),
+            &mut input_sequence,
+            b"a",
+        )
+        .unwrap();
+        assert_eq!(
+            crate::server::read_frame(&mut peer).unwrap(),
+            Some((INPUT, b"a".to_vec()))
+        );
+        assert_eq!(input_sequence.sent, 0);
+    }
+
     fn send(
         server: &mut UnixStream,
         decoder: &mut InputDecoder,
@@ -632,9 +917,19 @@ mod tests {
         output: &mut Vec<u8>,
         bytes: &[u8],
     ) {
-        send_input(server, decoder, renderer, prompt, output, (20, 3), bytes).unwrap();
+        let mut input_sequence = InputSequence::default();
+        send_input(
+            server,
+            decoder,
+            renderer,
+            prompt,
+            output,
+            (20, 3),
+            &mut input_sequence,
+            bytes,
+        )
+        .unwrap();
     }
-
 
     #[test]
     fn semantic_normal_escape_flushes_vim_escape_immediately() {
@@ -642,8 +937,8 @@ mod tests {
         let mut decoder = InputDecoder::default();
         let mut renderer = renderer_with_buffer();
         let mut prompt = None;
+        let mut input_sequence = InputSequence::default();
         let mut output = Vec::new();
-
         handle_input_action(
             &mut client,
             &mut decoder,
@@ -651,6 +946,7 @@ mod tests {
             &mut prompt,
             &mut output,
             (20, 3),
+            &mut input_sequence,
             InputAction::Command(crate::input::InputCommand {
                 kind: VIM_KEY,
                 payload: b"\x1b",
@@ -658,8 +954,16 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(crate::server::read_frame(&mut peer).unwrap(), Some((VIM_KEY, b"\x1b".to_vec())));
-        assert_eq!(crate::server::read_frame(&mut peer).unwrap(), Some((VIM_FLUSH, Vec::new())));
+        let mut expected = 1u64.to_be_bytes().to_vec();
+        expected.push(b'\x1b');
+        assert_eq!(
+            crate::server::read_frame(&mut peer).unwrap(),
+            Some((VIM_KEY_SYNC, expected))
+        );
+        assert_eq!(
+            crate::server::read_frame(&mut peer).unwrap(),
+            Some((VIM_FLUSH_SYNC, 2u64.to_be_bytes().to_vec()))
+        );
     }
     #[test]
     fn rename_edits_words_at_unicode_cursor_boundaries() {
@@ -669,7 +973,10 @@ mod tests {
         assert!(matches!(prompt.feed(b"\x1b[").0, PromptResult::Editing));
         assert!(matches!(prompt.feed(b"1;5D").0, PromptResult::Editing));
         assert_eq!(&prompt.name[prompt.cursor..], "雪  three");
-        assert!(matches!(prompt.feed("山".as_bytes()).0, PromptResult::Editing));
+        assert!(matches!(
+            prompt.feed("山".as_bytes()).0,
+            PromptResult::Editing
+        ));
         assert_eq!(prompt.name, "one 山雪  three");
         assert!(matches!(prompt.feed(b"\x1b[1;5C").0, PromptResult::Editing));
         assert_eq!(&prompt.name[prompt.cursor..], "three");
@@ -872,7 +1179,13 @@ fn report_yank_error(
     let reason = error
         .to_string()
         .chars()
-        .map(|character| if character.is_control() { ' ' } else { character })
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect::<String>();
     let message = format!("rmux: clipboard yank failed (xclip): {reason}");
     crossterm::queue!(
@@ -902,4 +1215,3 @@ mod clipboard_tests {
         assert!(!text.contains('\n'));
     }
 }
-

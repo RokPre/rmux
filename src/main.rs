@@ -24,9 +24,22 @@ pub(crate) fn debug_log(message: std::fmt::Arguments<'_>) {
     let Some(path) = env::var_os("RMUX_DEBUG_LOG") else {
         return;
     };
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
-        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-        let _ = writeln!(file, "{}.{:03} pid={} {message}", timestamp.as_secs(), timestamp.subsec_millis(), std::process::id());
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+    {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let _ = writeln!(
+            file,
+            "{}.{:03} pid={} {message}",
+            timestamp.as_secs(),
+            timestamp.subsec_millis(),
+            std::process::id()
+        );
     }
 }
 const USAGE: &str = "usage: rmux {new|up} NAME [--cwd DIRECTORY] [-- COMMAND [ARG...]] | rmux {attach|kill} NAME | rmux ls";
@@ -63,6 +76,8 @@ pub(crate) struct Response {
     pub supports_resize_step: bool,
     #[serde(default)]
     pub supports_vim_protocol: bool,
+    #[serde(default)]
+    pub supports_input_ack: bool,
 }
 
 fn main() {
@@ -237,7 +252,11 @@ fn start_server(
     use std::os::unix::process::CommandExt;
     let stderr = if let Some(path) = env::var_os("RMUX_DEBUG_LOG") {
         use std::os::unix::fs::OpenOptionsExt;
-        let file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
             .map_err(|error| format!("could not open RMUX_DEBUG_LOG: {error}"))?;
         server.env("RUST_BACKTRACE", "1");
         Stdio::from(file)

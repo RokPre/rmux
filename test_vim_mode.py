@@ -28,6 +28,8 @@ PREVIOUS_BUFFER = 6
 SPLIT_VERTICAL = 8
 HISTORY_SNAPSHOT = 6
 HISTORY_VIEW = 18
+INPUT_ACK = 9
+VIM_KEY_SYNC = 22
 
 
 class VimModeSessions(unittest.TestCase):
@@ -166,6 +168,19 @@ class VimModeSessions(unittest.TestCase):
             time.sleep(0.02)
         self.fail(message)
 
+    def wait_for_input_ack(self, sock, sequence, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            ready_sockets, _, _ = select.select(
+                [sock], [], [], deadline - time.monotonic()
+            )
+            if not ready_sockets:
+                return False
+            kind, payload = self.read_frame(sock)
+            if kind == INPUT_ACK and payload == sequence.to_bytes(8, 'big'):
+                return True
+        return False
+
     def send_keys(self, terminal, data):
         os.write(terminal, data)
         time.sleep(0.1)
@@ -199,6 +214,139 @@ class VimModeSessions(unittest.TestCase):
         self.send_keys(terminal, payload)
         self.wait_for(received.exists, 'application did not receive Insert-mode input')
         self.assertEqual(received.read_bytes(), payload)
+
+    def test_configured_operator_remap_yanks_text_object(self):
+        config = self.root / 'config' / 'rmux' / 'config.toml'
+        config.parent.mkdir()
+        config.write_text('[bindings]\nvim_yank_inner = "x"\nvim_word_forward = "z"\n')
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        clipboard = self.root / 'clipboard'
+        xclip = bin_dir / 'xclip'
+        xclip.write_text('#!/usr/bin/python3\nimport sys\nopen(' +
+                         repr(str(clipboard)) + ', "wb").write(sys.stdin.buffer.read())\n')
+        xclip.chmod(0o755)
+        env = dict(self.env, PATH=f'{bin_dir}:{self.env.get("PATH", "")}')
+        _, terminal, _ = self.start_shell_session(command="printf 'hello world\\033[H'; sleep 30", env=env)
+        self.wait_for(lambda: self.latest_state() is not None)
+        buffer = self.latest_state()['buffer']
+        self.send_keys(terminal, b'\x1b\x1b')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'normal')
+        self.send_keys(terminal, b'yx')
+        self.wait_for(lambda: self.latest_state(buffer).get('operator_pending') == 'yi')
+        self.send_keys(terminal, b'w')
+        self.wait_for(clipboard.exists, 'remapped text-object yank did not reach clipboard')
+        self.assertEqual(clipboard.read_bytes(), b'hello')
+
+    def test_other_client_cannot_interleave_pending_vim_command(self):
+        ready = self.root / 'ready'
+        received = self.root / 'received'
+        clipboard = self.root / 'clipboard'
+        script = (
+            'import os,tty; '
+            "print('hello world\x1b[H', end='', flush=True); "
+            'tty.setraw(0); '
+            f'open({str(ready)!r},"w").close(); '
+            'data=bytearray(); '
+            'exec("while len(data) < 2:\\n data.extend(os.read(0, 2-len(data)))"); '
+            f'open({str(received)!r},"wb").write(data)'
+        )
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        xclip = bin_dir / 'xclip'
+        xclip.write_text(
+            '#!/usr/bin/python3\nimport sys\nopen('
+            + repr(str(clipboard))
+            + ', "wb").write(sys.stdin.buffer.read())\n'
+        )
+        xclip.chmod(0o755)
+        env = dict(self.env, PATH=f'{bin_dir}:{self.env.get("PATH", "")}')
+        _, terminal, _ = self.start_shell_session(
+            name='vim-interleave',
+            command='python3 -u -c ' + shlex.quote(script),
+            env=env,
+        )
+        self.wait_for(ready.exists, 'input-capturing application did not start')
+        self.wait_for(
+            lambda: self.latest_state() is not None,
+            'session did not report its initial Vim state',
+        )
+        buffer = self.latest_state()['buffer']
+        other_client = self.attach_control('vim-interleave', observe=False)
+
+        self.send_keys(terminal, b'\x1b\x1b')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'normal')
+        self.send_keys(terminal, b'y')
+        self.wait_for(
+            lambda: self.latest_state(buffer).get('operator_pending') == 'y'
+        )
+        self.send_frame(
+            other_client,
+            VIM_KEY_SYNC,
+            (1).to_bytes(8, 'big') + b'w',
+        )
+
+
+        self.assertFalse(
+            self.wait_for_input_ack(other_client, 1, 0.15),
+            'another client completed the pending operator before its owner',
+        )
+        self.send_keys(terminal, b'i')
+        self.wait_for(
+            lambda: self.latest_state(buffer).get('operator_pending') == 'yi'
+        )
+        self.send_keys(terminal, b'w\r')
+        self.wait_for(
+            lambda: clipboard.exists()
+            and self.latest_state(buffer)['mode'] == 'normal'
+            and self.latest_state(buffer).get('operator_pending') is None,
+            'the owning client did not complete its text-object yank',
+        )
+        self.assertTrue(
+            self.wait_for_input_ack(other_client, 1, 3),
+            'queued input from the other client was not released afterward',
+        )
+        self.assertEqual(clipboard.read_bytes(), b'hello')
+        self.assertFalse(
+            received.exists(),
+            'keys typed during another client’s yank reached the application',
+        )
+
+    def test_detaching_pending_vim_owner_releases_other_client(self):
+        process, terminal, _ = self.start_shell_session(
+            name='vim-disconnect',
+            command='sleep 30',
+        )
+        self.wait_for(
+            lambda: self.latest_state() is not None,
+            'session did not report its initial Vim state',
+        )
+        buffer = self.latest_state()['buffer']
+        other_client = self.attach_control('vim-disconnect', observe=False)
+
+        self.send_keys(terminal, b'\x1b\x1b')
+        self.wait_for(lambda: self.latest_state(buffer)['mode'] == 'normal')
+        self.send_keys(terminal, b'y')
+        self.wait_for(
+            lambda: self.latest_state(buffer).get('operator_pending') == 'y'
+        )
+        self.send_frame(
+            other_client,
+            VIM_KEY_SYNC,
+            (1).to_bytes(8, 'big') + b'w',
+        )
+        process.terminate()
+        process.wait(timeout=3)
+
+        self.assertTrue(
+            self.wait_for_input_ack(other_client, 1, 3),
+            'pending input remained blocked after its owner detached',
+        )
+        self.wait_for(
+            lambda: self.latest_state(buffer)['mode'] == 'normal'
+            and self.latest_state(buffer).get('operator_pending') is None,
+            'disconnect did not clear the abandoned Vim key sequence',
+        )
 
     def test_remapped_escape_preserves_following_application_input(self):
         config = self.root / 'config' / 'rmux' / 'config.toml'
