@@ -250,7 +250,7 @@ def rename_buffer(keyboard: Keyboard, name: str) -> None:
     time.sleep(0.8)
 
 def zoom_st(keyboard: Keyboard) -> None:
-    for _ in range(7):
+    for _ in range(12):
         keyboard.chord(("Control_L",), "plus")
 
 
