@@ -175,7 +175,7 @@ def write_demo_shell(path: Path) -> None:
         "i=1\n"
         "while [ \"$i\" -le 140 ]; do\n"
         "  case \"$i\" in\n"
-        "    20|50|80|110) printf 'conversation %03d: searchable needle in retained output\\n' \"$i\" ;;\n"
+        "    60|70|80|90) printf 'conversation %03d: searchable needle in retained output\\n' \"$i\" ;;\n"
         "    *) printf 'conversation %03d: example terminal output\\n' \"$i\" ;;\n"
         "  esac\n"
         "  i=$((i + 1))\n"
@@ -249,6 +249,10 @@ def rename_buffer(keyboard: Keyboard, name: str) -> None:
     keyboard.tap("Return")
     time.sleep(0.8)
 
+def zoom_st(keyboard: Keyboard) -> None:
+    for _ in range(7):
+        keyboard.chord(("Control_L",), "plus")
+
 
 def focus_upper_right(keyboard: Keyboard) -> None:
     """From the full-height left pane, resolve the two right-side choices."""
@@ -313,6 +317,7 @@ def main() -> int:
         rect = capture_rect(demo_output["rect"], screen.width_in_pixels, screen.height_in_pixels)
         width, height = rect["width"], rect["height"]
         first = launch_client(st, rmux, ["new", SESSION, "--", "/bin/sh", str(shell_script)])
+        zoom_st(keyboard)
         time.sleep(1.0)
         recorder = subprocess.Popen(
             [
@@ -464,6 +469,7 @@ def main() -> int:
         narrate(keyboard, "next attach second st client")
         run_i3("split h")
         second = launch_client(st, rmux, ["attach", SESSION])
+        zoom_st(keyboard)
         narrate(keyboard, "next resize the st clients")
         run_i3(f"[id={second}] resize set width 38 ppt")
         time.sleep(1.0)
@@ -482,6 +488,7 @@ def main() -> int:
         narrate(keyboard, "next attach a third client to this session")
         run_i3("split h")
         third = launch_client(st, rmux, ["attach", SESSION])
+        zoom_st(keyboard)
         run_i3(f"[id={third}] resize set width 42 ppt")
         time.sleep(1.0)
         narrate(keyboard, "the same rmux session is still live")
@@ -500,8 +507,8 @@ def main() -> int:
                 "-i",
                 str(capture),
                 "-filter_complex",
-                "fps=10,scale=1200:-1:flags=lanczos,split[a][b];"
-                "[a]palettegen=max_colors=96[p];[b][p]paletteuse=dither=bayer",
+                "fps=8,scale=1200:-1:flags=lanczos,split[a][b];"
+                "[a]palettegen=max_colors=64[p];[b][p]paletteuse=dither=bayer",
                 "-loop",
                 "0",
                 str(output),
