@@ -507,8 +507,10 @@ def main() -> int:
                 "-i",
                 str(capture),
                 "-filter_complex",
-                "fps=8,scale=1200:-1:flags=lanczos,split[a][b];"
+                "fps=8,setpts=PTS/1.5,scale=1200:-1:flags=lanczos,split[a][b];"
                 "[a]palettegen=max_colors=64[p];[b][p]paletteuse=dither=bayer",
+                "-fps_mode",
+                "passthrough",
                 "-loop",
                 "0",
                 str(output),
